@@ -16,8 +16,8 @@ execution:
   safe_mode: true
   dry_run: true
   action_mode: absolute
-  policy_unit: rad
-  control_unit: rad
+  policy_unit: deg
+  control_unit: deg
 
 robot:
   backend: fake

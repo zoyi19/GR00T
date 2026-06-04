@@ -38,8 +38,9 @@ ACTION_SCHEMA_VERSION = "tianji_dual_arm_dexterous_hand_v1"
 ACTION_ORDER_VERSION = ACTION_SCHEMA_VERSION
 
 # Runtime units. These must match the trained checkpoint and the hardware controller.
-STATE_UNIT = "rad"
-ACTION_UNIT = "rad"
+# The current Tianji host-runtime integration standardizes on degrees.
+STATE_UNIT = "deg"
+ACTION_UNIT = "deg"
 ACTION_MODE = "absolute"  # "absolute" joint targets unless explicitly changed.
 
 LEFT_ARM_KEYS = [f"left_joint_{i}.pos" for i in range(1, LEFT_ARM_DOF + 1)]

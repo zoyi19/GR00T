@@ -40,15 +40,17 @@ class SafetyConfig:
     def permissive(
         cls,
         *,
-        arm_max_step: float = 0.05,
-        hand_max_step: float = 0.08,
+        arm_max_step: float = 3.0,
+        hand_max_step: float = 4.5,
         arm_max_velocity: float | None = None,
         hand_max_velocity: float | None = None,
     ) -> "SafetyConfig":
-        arm_min = np.full(schema.LEFT_ARM_DOF, -np.pi, dtype=np.float32)
-        arm_max = np.full(schema.LEFT_ARM_DOF, np.pi, dtype=np.float32)
-        hand_min = np.full(schema.LEFT_HAND_DOF, -np.pi, dtype=np.float32)
-        hand_max = np.full(schema.LEFT_HAND_DOF, np.pi, dtype=np.float32)
+        # Marvin M6-CCS independent arm joint limits from the vendor manual.
+        arm_min = np.array([-178.0, -120.0, -178.0, -145.0, -178.0, -60.0, -90.0], dtype=np.float32)
+        arm_max = np.array([178.0, 120.0, 178.0, 60.0, 178.0, 60.0, 90.0], dtype=np.float32)
+        # Keep hand limits broad until Wuji hand hardware/data units are finalized.
+        hand_min = np.full(schema.LEFT_HAND_DOF, -360.0, dtype=np.float32)
+        hand_max = np.full(schema.LEFT_HAND_DOF, 360.0, dtype=np.float32)
         arm_vel = (
             None
             if arm_max_velocity is None
