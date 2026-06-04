@@ -7,12 +7,18 @@ from importlib import import_module
 from pathlib import Path
 import sys
 import threading
+import time
 from types import ModuleType
 from typing import Any
 
 import numpy as np
 
 from . import schema
+
+
+# Settling delay between SDK state transitions during the idle-reset/enable handshake.
+# Mirrors the known-good DexProj state=3 probe path.
+_IDLE_RESET_SETTLE_SEC = 0.5
 
 
 DEFAULT_TIANJI_SDK_ROOT = Path(
@@ -169,6 +175,7 @@ class TianjiDualArmSystem:
         controller = self._require_controller()
         try:
             self._clear_robot_errors_and_prime_feedback(controller)
+            self._idle_reset_arms(controller)
             controller.set_impedance_mode(mode="joint")
             left, right = controller.get_current_joints()
         except Exception as exc:  # noqa: BLE001
@@ -204,6 +211,37 @@ class TianjiDualArmSystem:
         clear_error("A")
         clear_error("B")
         send_cmd()
+
+    def _idle_reset_arms(self, controller: Any) -> None:
+        """Force both arms through state=0 + clear_error before enabling state=3.
+
+        Jumping straight to state=3 only re-arms an arm that is already in a clean
+        idle state. After an abnormal exit or a latched protective stop, the SDK
+        keeps accepting joint commands while the arm never actually servos. Driving
+        state=0 then clearing faults first matches the known-good DexProj probe path
+        and lets the subsequent set_impedance_mode (state=3) actually take effect.
+        """
+        robot = getattr(controller, "robot", None)
+        if robot is None:
+            return
+        clear_set = getattr(robot, "clear_set", None)
+        set_state = getattr(robot, "set_state", None)
+        clear_error = getattr(robot, "clear_error", None)
+        send_cmd = getattr(robot, "send_cmd", None)
+        if not all(callable(fn) for fn in (clear_set, set_state, clear_error, send_cmd)):
+            return
+
+        clear_set()
+        set_state(arm="A", state=0)
+        set_state(arm="B", state=0)
+        send_cmd()
+        time.sleep(_IDLE_RESET_SETTLE_SEC)
+
+        clear_set()
+        clear_error("A")
+        clear_error("B")
+        send_cmd()
+        time.sleep(_IDLE_RESET_SETTLE_SEC)
 
     def _update_hold_targets(self, left: np.ndarray, right: np.ndarray) -> None:
         with self._command_lock:
