@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read the unified 54-DoF robot state once."""
+"""Read the structured robot state once and print the canonical flat view."""
 
 from __future__ import annotations
 
@@ -23,8 +23,12 @@ def main() -> int:
     robot.connect()
     try:
         state = robot.get_state()
-        print(f"state shape: {state.shape}")
-        print(state)
+        flat = state.as_flat()
+        print("structured segments:")
+        for name, values in state.as_dict().items():
+            print(f"  {name}: len={len(values)}")
+        print(f"flat state shape: {flat.shape}")
+        print(flat)
     finally:
         robot.hold_position()
         robot.disconnect()
@@ -33,4 +37,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

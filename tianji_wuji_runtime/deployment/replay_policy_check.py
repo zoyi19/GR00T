@@ -73,11 +73,12 @@ def main() -> int:
     robot.connect()
     try:
         current_state = robot.get_state()
+        current_state_flat = current_state.as_flat()
         actions = adapter.split_chunk(raw_chunk)
         safe_actions, safety_events = safety.process_chunk(current_state, actions, args.duration)
         recorder.save_chunk(
             observation={
-                "state": {"replay_current_state": current_state[None, None, :]},
+                "state": {"replay_current_state": current_state_flat[None, None, :]},
                 "video": {},
                 "language": {"replay": [["replay policy check"]]},
             },

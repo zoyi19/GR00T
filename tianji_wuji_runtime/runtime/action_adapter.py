@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import schema
+from .robot_state import DualArmHandState, ensure_state
 
 
 class ActionAdapterError(RuntimeError):
@@ -91,14 +92,8 @@ class ActionAdapter:
             right_hand_q=arr[schema.RIGHT_HAND_SLICE],
         )
 
-    def split_state(self, state_54: np.ndarray) -> DualArmHandAction:
-        arr = schema.validate_flat_vector(state_54, dim=schema.STATE_DIM, name="state_54")
-        return DualArmHandAction(
-            left_arm_q=arr[schema.LEFT_ARM_SLICE],
-            left_hand_q=arr[schema.LEFT_HAND_SLICE],
-            right_arm_q=arr[schema.RIGHT_ARM_SLICE],
-            right_hand_q=arr[schema.RIGHT_HAND_SLICE],
-        )
+    def split_state(self, state: DualArmHandState | np.ndarray) -> DualArmHandState:
+        return ensure_state(state).copy()
 
     def split_chunk(self, action_chunk: np.ndarray) -> list[DualArmHandAction]:
         arr = np.asarray(action_chunk, dtype=np.float32)
@@ -126,14 +121,17 @@ class ActionAdapter:
             return np.empty((0, schema.ACTION_DIM), dtype=np.float32)
         return np.stack([self.merge_action(action) for action in actions], axis=0)
 
+    def merge_state(self, state: DualArmHandState | np.ndarray) -> np.ndarray:
+        return ensure_state(state).as_flat()
+
     def to_absolute(
         self,
-        current_state_54: np.ndarray,
+        current_state: DualArmHandState | np.ndarray,
         action: DualArmHandAction,
     ) -> DualArmHandAction:
         if self.action_mode == "absolute":
             return action.copy()
-        current = self.split_state(current_state_54)
+        current = self.split_state(current_state)
         return DualArmHandAction(
             left_arm_q=current.left_arm_q + action.left_arm_q,
             left_hand_q=current.left_hand_q + action.left_hand_q,

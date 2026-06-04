@@ -8,6 +8,7 @@ import numpy as np
 
 from . import schema
 from .action_adapter import ActionAdapter, DualArmHandAction
+from .robot_state import DualArmHandState
 
 
 class SafetyError(RuntimeError):
@@ -110,7 +111,7 @@ class SafetyLayer:
 
     def clip_delta(
         self,
-        current_state: np.ndarray,
+        current_state: DualArmHandState | np.ndarray,
         action: DualArmHandAction,
     ) -> tuple[DualArmHandAction, list[dict[str, object]]]:
         if not self.config.enable_delta_clip:
@@ -148,22 +149,18 @@ class SafetyLayer:
 
     def process_chunk(
         self,
-        current_state: np.ndarray,
+        current_state: DualArmHandState | np.ndarray,
         actions: list[DualArmHandAction],
         dt: float,
     ) -> tuple[list[DualArmHandAction], list[dict[str, object]]]:
-        current_state = schema.validate_flat_vector(
-            current_state,
-            dim=schema.STATE_DIM,
-            name="current_state",
-        )
+        current = self.adapter.split_state(current_state)
         processed: list[DualArmHandAction] = []
         all_events: list[dict[str, object]] = []
-        reference = self.adapter.split_state(current_state)
+        reference: DualArmHandState | DualArmHandAction = current
 
         for step_idx, action in enumerate(actions):
             self.check_finite(action)
-            candidate = self.adapter.to_absolute(current_state, action)
+            candidate = self.adapter.to_absolute(current, action)
             step_events: list[dict[str, object]] = []
 
             candidate, events = self.clamp_joint_limits(candidate)
@@ -196,7 +193,7 @@ class SafetyLayer:
 
     def _clip_against_reference(
         self,
-        reference: DualArmHandAction,
+        reference: DualArmHandState | DualArmHandAction,
         action: DualArmHandAction,
     ) -> tuple[DualArmHandAction, list[dict[str, object]]]:
         cfg = self.config
@@ -237,4 +234,3 @@ def _segments(action: DualArmHandAction):
     yield "left_hand", action.left_hand_q
     yield "right_arm", action.right_arm_q
     yield "right_hand", action.right_hand_q
-

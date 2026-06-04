@@ -160,7 +160,7 @@ infer_logs/run_YYYYMMDD_HHMMSS_xxxxxx/
 - 左臂/右臂 SDK：`connect/get_joint_state/send_joint_position/hold_position/go_home`
 - 左手/右手 SDK：`connect/get_joint_state/send_joint_position/hold_position/go_home`
 - 7 个臂关节顺序、20 个手关节顺序、左右侧定义
-- 真机 `get_state()` 必须按 `left_arm_joint + right_arm_joint + left_hand + right_hand` 返回 `(54,)`
+- 真机 `get_state()` 返回结构化 `DualArmHandState`，需要 flat 日志/数据集视图时用 `state.as_flat()` 得到 `(54,)`
 - 单位：rad / degree / encoder / normalized
 - joint min/max、max velocity、max single-step delta
 - `send_joint_position` 接收 absolute target 还是 delta

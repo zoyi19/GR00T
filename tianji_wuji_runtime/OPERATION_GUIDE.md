@@ -74,7 +74,8 @@ right_wrist
 真机接口最终必须保证：
 
 ```text
-robot.get_state() -> shape (54,)
+robot.get_state() -> DualArmHandState(left_arm_q, right_arm_q, left_hand_q, right_hand_q)
+robot.get_state().as_flat() -> shape (54,)
 policy raw action -> shape [H, 54]
 robot.send_action() -> 分别下发 7/7/20/20 维动作
 ```

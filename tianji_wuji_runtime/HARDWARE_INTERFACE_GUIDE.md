@@ -610,13 +610,28 @@ hold_position()
 go_home()
 ```
 
-其中 `get_state()` 会拼接成：
+其中 `get_state()` 会返回结构化状态：
+
+```text
+DualArmHandState(
+  left_arm_q=(7,),
+  right_arm_q=(7,),
+  left_hand_q=(20,),
+  right_hand_q=(20,),
+)
+```
+
+需要和数据集或日志对齐时，再调用：
+
+```python
+state.as_flat()
+```
+
+得到 canonical `(54,)`：
 
 ```text
 left_arm + right_arm + left_hand + right_hand
 ```
-
-也就是最终 `(54,)`。
 
 ### 4.3 硬件同学需要补什么
 
@@ -809,7 +824,8 @@ python tianji_wuji_runtime/tools/check_robot_state.py \
 期望：
 
 ```text
-state shape: (54,)
+structured segments: left_arm/right_arm/left_hand/right_hand
+flat state shape: (54,)
 无 NaN/Inf
 数值范围合理
 ```
@@ -964,8 +980,9 @@ execution_horizon = 4
 
 ```text
 robot.connect() 成功连接四个设备
-robot.get_state() 返回 (54,) float32
-robot.get_state() 顺序为 left_arm + right_arm + left_hand + right_hand
+robot.get_state() 返回 DualArmHandState
+robot.get_state().as_flat() 返回 (54,) float32
+as_flat() 顺序为 left_arm + right_arm + left_hand + right_hand
 camera.read() 返回 head/left_wrist/right_wrist 三张 RGB uint8 图
 robot.send_action() 能接收 7/7/20/20 分段动作
 hold_position() 在异常和退出时可靠生效

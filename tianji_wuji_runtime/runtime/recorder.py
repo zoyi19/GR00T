@@ -13,6 +13,7 @@ from PIL import Image
 
 from . import schema
 from .action_adapter import ActionAdapter, DualArmHandAction
+from .robot_state import DualArmHandState
 
 
 class Recorder:
@@ -89,11 +90,11 @@ class Recorder:
         *,
         chunk_index: int,
         step_in_chunk: int,
-        state_before: np.ndarray | None,
+        state_before: DualArmHandState | np.ndarray | None,
         raw_action: np.ndarray | None,
         safe_action: DualArmHandAction,
         executed: bool,
-        state_after: np.ndarray | None,
+        state_after: DualArmHandState | np.ndarray | None,
         control_latency_ms: float,
         safety_events: list[dict[str, object]] | None = None,
     ) -> None:
@@ -104,11 +105,11 @@ class Recorder:
                 "timestamp": time.time(),
                 "chunk_index": chunk_index,
                 "step_in_chunk": step_in_chunk,
-                "state_before": None if state_before is None else np.asarray(state_before).tolist(),
+                "state_before": _state_to_flat_list(state_before),
                 "raw_action": None if raw_action is None else np.asarray(raw_action).tolist(),
                 "safe_action": safe_flat.tolist(),
                 "executed_action": safe_flat.tolist() if executed else None,
-                "state_after": None if state_after is None else np.asarray(state_after).tolist(),
+                "state_after": _state_to_flat_list(state_after),
                 "control_latency_ms": control_latency_ms,
                 "safety_events": safety_events or [],
             },
@@ -156,6 +157,8 @@ class Recorder:
 
 
 def _to_jsonable(value: Any) -> Any:
+    if isinstance(value, DualArmHandState):
+        return value.as_flat().tolist()
     if isinstance(value, np.ndarray):
         return value.tolist()
     if isinstance(value, np.generic):
@@ -171,3 +174,11 @@ def _to_jsonable(value: Any) -> Any:
 
 def _safe_name(name: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in name)
+
+
+def _state_to_flat_list(value: DualArmHandState | np.ndarray | None) -> list[float] | None:
+    if value is None:
+        return None
+    if isinstance(value, DualArmHandState):
+        return value.as_flat().tolist()
+    return np.asarray(value, dtype=np.float32).reshape(-1).tolist()

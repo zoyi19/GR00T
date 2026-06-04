@@ -4,12 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import numpy as np
-
-from . import schema
 from .action_adapter import DualArmHandAction
 from .arm_interface import ArmConnectionConfig, ArmInterface, FakeArmInterface
 from .hand_interface import FakeHandInterface, HandConnectionConfig, HandInterface
+from .robot_state import DualArmHandState
 
 
 class RobotError(RuntimeError):
@@ -67,18 +65,14 @@ class DualArmHandRobot:
     def is_connected(self) -> bool:
         return self._connected
 
-    def get_state(self) -> np.ndarray:
+    def get_state(self) -> DualArmHandState:
         try:
-            state = np.concatenate(
-                [
-                    self.left_arm.get_joint_state(),
-                    self.right_arm.get_joint_state(),
-                    self.left_hand.get_joint_state(),
-                    self.right_hand.get_joint_state(),
-                ],
-                axis=0,
-            ).astype(np.float32)
-            return schema.validate_flat_vector(state, dim=schema.STATE_DIM, name="robot_state")
+            return DualArmHandState(
+                left_arm_q=self.left_arm.get_joint_state(),
+                right_arm_q=self.right_arm.get_joint_state(),
+                left_hand_q=self.left_hand.get_joint_state(),
+                right_hand_q=self.right_hand.get_joint_state(),
+            )
         except Exception as exc:  # noqa: BLE001
             self.hold_position()
             raise RobotError(f"failed to read robot state: {exc}") from exc

@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 
 from . import schema
+from .robot_state import DualArmHandState, ensure_state
 
 
 class ObservationError(RuntimeError):
@@ -42,11 +43,11 @@ class ObservationBuilder:
 
     def build(
         self,
-        state: np.ndarray,
+        state: DualArmHandState | np.ndarray,
         images: dict[str, np.ndarray],
         task: str,
     ) -> dict[str, Any]:
-        state_54 = schema.validate_flat_vector(state, dim=schema.STATE_DIM, name="state")
+        state_54 = ensure_state(state).as_flat()
         if not task or not task.strip():
             raise ObservationError("task must be a non-empty string")
 
@@ -111,4 +112,3 @@ class ObservationBuilder:
         while len(values) < horizon:
             values.insert(0, values[0])
         return np.stack(values[-horizon:], axis=0)
-
