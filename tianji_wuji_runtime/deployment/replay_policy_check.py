@@ -26,7 +26,7 @@ from tianji_wuji_runtime.runtime.safety import SafetyConfig, SafetyLayer
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--action-file", required=True)
-    parser.add_argument("--duration", type=float, default=0.1)
+    parser.add_argument("--duration", type=float, default=0.05)
     parser.add_argument("--safe-mode", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--record-dir", default=str(RUNTIME_ROOT / "infer_logs" / "replay"))
@@ -58,8 +58,10 @@ def main() -> int:
         args.record_dir,
         config={
             "entrypoint": "replay_policy_check.py",
+            "inference_mode": "sync_replay",
             "action_file": args.action_file,
             "duration": args.duration,
+            "control_frequency_hz": 1.0 / args.duration,
             "safe_mode": args.safe_mode,
             "dry_run": args.dry_run,
             "max_steps": args.max_steps,
@@ -105,4 +107,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -12,6 +12,14 @@ robot state/image/task
   -> recorder logs
 ```
 
+当前 runtime 采用同步推理闭环：
+
+```text
+采集 state/image/task -> policy 推理 -> 执行前 N 步 action chunk -> 再采集
+```
+
+暂不引入异步 policy thread 或 action buffer。若训练数据采样频率按 20Hz 处理，部署侧 action step 默认使用 `--duration 0.05` 对齐。
+
 ## 54 维顺序
 
 当前 schema 固定在 `runtime/schema.py`，已对齐
@@ -94,7 +102,7 @@ python deployment/infer_tianji_wuji.py \
   --policy-port 5555 \
   --task "pick up bottle" \
   --execution-horizon 1 \
-  --duration 0.1 \
+  --duration 0.05 \
   --safe-mode \
   --dry-run \
   --record-dir ./infer_logs \
@@ -123,7 +131,7 @@ Q      hold_position 并退出
 ```bash
 python deployment/replay_policy_check.py \
   --action-file ./infer_logs/run_xxx/chunks/chunk_000000/output/raw_action.npy \
-  --duration 0.1 \
+  --duration 0.05 \
   --safe-mode \
   --dry-run
 ```

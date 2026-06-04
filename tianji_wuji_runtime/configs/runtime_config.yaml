@@ -11,7 +11,8 @@ task:
 
 execution:
   execution_horizon: 1
-  duration: 0.1
+  duration: 0.05
+  inference_mode: sync
   safe_mode: true
   dry_run: true
   action_mode: absolute

@@ -25,6 +25,21 @@ deployment/infer_tianji_wuji.py
   -> 保存日志
 ```
 
+当前先统一采用同步推理闭环：
+
+```text
+采集当前 state/image/task
+  -> policy 推理一次
+  -> 按固定 duration 执行 action chunk 的前 N 步
+  -> 再回到下一轮采集和推理
+```
+
+暂不使用异步 policy thread、异步控制线程或 action buffer。若训练数据采样频率按 20Hz 处理，部署侧默认 action step 使用：
+
+```bash
+--duration 0.05
+```
+
 ## 1. 数据和维度约定
 
 当前 runtime 已对齐数据集：
@@ -87,14 +102,14 @@ hold_position 是否能可靠保持当前位置
 通信断开或异常时是否会进入安全状态
 ```
 
-建议 runtime 内部统一使用：
+建议 runtime 和 policy 交互时统一使用训练数据单位：
 
 ```text
-单位：rad
+单位：和训练数据 state/action 保持一致
 动作模式：absolute joint target
 ```
 
-如果硬件 SDK 使用 degree 或 encoder，需要在 `ArmInterface` / `HandInterface` 的真实实现里做转换，不要在主循环里临时切片或转换。
+例如当前 checkpoint 里机械臂数值更像 degree，灵巧手是另一套手指关节单位；不要用一个全局 rad/degree 转换一刀切。硬件 SDK 如果使用不同单位，需要在 `ArmInterface` / `HandInterface` 的真实实现里按 arm/hand 分段转换，不要在主循环里临时切片或转换。
 
 ## 3. 环境检查
 
@@ -189,7 +204,7 @@ python deployment/dry_run_infer.py \
   --policy-port 5555 \
   --task "pick up bottle" \
   --execution-horizon 1 \
-  --duration 0.1 \
+  --duration 0.05 \
   --record-dir ./infer_logs/dry_run
 ```
 
@@ -201,7 +216,7 @@ python deployment/infer_tianji_wuji.py \
   --policy-port 5555 \
   --task "pick up bottle" \
   --execution-horizon 1 \
-  --duration 0.1 \
+  --duration 0.05 \
   --safe-mode \
   --dry-run \
   --camera head:0 \
@@ -211,6 +226,59 @@ python deployment/infer_tianji_wuji.py \
 
 启动后默认是 `STOPPED`，需要按 `R` 或 safe-mode 下按 `N` 才会执行一段。
 
+## 5.1 数据集帧 Policy 对比
+
+如果想确认“数据集某一帧的相机 + state + prompt -> policy 动作”是否和 GT action 大致对得上，可以使用：
+
+```bash
+python tools/dataset_policy_check.py \
+  --policy-host 127.0.0.1 \
+  --policy-port 5555 \
+  --dataset-path /mnt/data/qdhe/workspace/datasets/local_lerobot_dataset \
+  --episodes 0,8,11 \
+  --fractions 0.15,0.55 \
+  --save-images
+```
+
+这个工具会：
+
+```text
+1. 从 LeRobot 数据集中读取指定 episode/step 的三路图像、state、task。
+2. 请求已经启动的 GR00T policy server。
+3. 得到 pred action chunk [16, 54]。
+4. 从数据集中读取同一时刻的 GT future action chunk [16, 54]。
+5. 按 left_arm / right_arm / left_hand / right_hand 计算 MAE/RMSE。
+6. 保存 pred_action.npy、gt_action.npy、input_state.npy 和 metrics.json。
+```
+
+也可以精确指定帧：
+
+```bash
+python tools/dataset_policy_check.py \
+  --policy-host 127.0.0.1 \
+  --policy-port 5555 \
+  --dataset-path /mnt/data/qdhe/workspace/datasets/local_lerobot_dataset \
+  --sample 0:38 \
+  --sample 8:206 \
+  --save-images
+```
+
+输出目录默认是：
+
+```text
+infer_logs/dataset_policy_check/run_*/
+```
+
+解读时优先看：
+
+```text
+overall_first_step_mae
+right_arm_first_step_mae
+right_hand_first_step_mae
+```
+
+因为真机初期通常使用 `--execution-horizon 1`，第一步动作是否对齐比完整 16 步 future chunk 更直接。完整 horizon 的误差随未来步增大是正常现象，尤其是演示轨迹有多种可能走法时。
+
 ## 6. 真机安全启动建议
 
 第一次真机上电测试，不建议连续运行。建议使用：
@@ -218,15 +286,15 @@ python deployment/infer_tianji_wuji.py \
 ```text
 --safe-mode
 --execution-horizon 1
---duration 0.1
+--duration 0.05
 ```
 
 含义：
 
 ```text
-safe-mode          每执行完一段自动暂停
-execution-horizon 1  每次只执行 policy 输出的第 1 帧动作
-duration 0.1      每帧动作间隔 0.1 秒，约 10Hz
+safe-mode             每执行完一段自动暂停
+execution-horizon 1   每次只执行 policy 输出的第 1 帧动作
+duration 0.05         每帧动作间隔 0.05 秒，约 20Hz
 ```
 
 示例命令：
@@ -242,7 +310,7 @@ python deployment/infer_tianji_wuji.py \
   --left-hand-ip <LEFT_HAND_IP> \
   --right-hand-ip <RIGHT_HAND_IP> \
   --execution-horizon 1 \
-  --duration 0.1 \
+  --duration 0.05 \
   --safe-mode \
   --camera head:0 \
   --camera left_wrist:1 \
@@ -259,7 +327,7 @@ python deployment/infer_tianji_wuji.py \
   --task "pick up bottle" \
   --robot-backend tianji \
   --execution-horizon 1 \
-  --duration 0.1 \
+  --duration 0.05 \
   --safe-mode \
   --auto-start \
   --no-keyboard \
@@ -535,7 +603,7 @@ Q      退出整个 runtime，并断开资源
 7. fake backend replay_policy_check.py
 8. 接真实硬件 backend，但先 --dry-run
 9. 真实硬件 --safe-mode --execution-horizon 1
-10. 确认稳定后再考虑提高 execution_horizon 或降低 duration
+10. 确认稳定后再考虑提高 execution_horizon；duration 默认保持 0.05，除非训练频率不同
 ```
 
 真机稳定前，不建议直接连续运行，也不建议一开始就执行完整 action horizon。

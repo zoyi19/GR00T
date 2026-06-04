@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera", action="append", default=[])
     parser.add_argument("--record-dir", default=str(RUNTIME_ROOT / "infer_logs" / "dry_run"))
     parser.add_argument("--execution-horizon", type=int, default=1)
-    parser.add_argument("--duration", type=float, default=0.1)
+    parser.add_argument("--duration", type=float, default=0.05)
     parser.add_argument("--max-arm-joint-step", type=float, default=0.05)
     parser.add_argument("--max-hand-joint-step", type=float, default=0.08)
     parser.add_argument("--action-mode", choices=["absolute", "delta"], default="absolute")
@@ -68,12 +68,15 @@ def main() -> int:
         args.record_dir,
         config={
             "entrypoint": "dry_run_infer.py",
+            "inference_mode": "sync",
             "policy_host": args.policy_host,
             "policy_port": args.policy_port,
             "task": args.task,
             "state_source": args.state_source,
             "image_source": args.image_source,
             "execution_horizon": args.execution_horizon,
+            "duration": args.duration,
+            "control_frequency_hz": 1.0 / args.duration,
         },
         adapter=adapter,
     )

@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--policy-timeout-ms", type=int, default=15000)
     parser.add_argument("--task", required=True)
     parser.add_argument("--execution-horizon", type=int, default=1)
-    parser.add_argument("--duration", type=float, default=0.1)
+    parser.add_argument("--duration", type=float, default=0.05)
     parser.add_argument("--safe-mode", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--record-dir", default=str(RUNTIME_ROOT / "infer_logs"))
@@ -125,11 +125,13 @@ def main() -> int:
         args.record_dir,
         config={
             "entrypoint": "infer_tianji_wuji.py",
+            "inference_mode": "sync",
             "policy_host": args.policy_host,
             "policy_port": args.policy_port,
             "task": args.task,
             "execution_horizon": args.execution_horizon,
             "duration": args.duration,
+            "control_frequency_hz": 1.0 / args.duration,
             "safe_mode": args.safe_mode,
             "dry_run": args.dry_run,
             "camera": args.camera,
@@ -149,6 +151,7 @@ def main() -> int:
     state_machine = RuntimeStateMachine(auto_start=args.auto_start, safe_mode=args.safe_mode)
 
     print(f"[runtime] logs: {recorder.run_dir}")
+    print(f"[runtime] inference mode: sync, action step: {args.duration:.4f}s")
     print("[runtime] controls: R run, P pause, Space hold, H home, N next safe chunk, Q quit")
 
     chunk_count = 0
