@@ -8,6 +8,8 @@ from pathlib import Path
 import sys
 import time
 
+import numpy as np
+
 
 RUNTIME_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = RUNTIME_ROOT.parent
@@ -26,11 +28,28 @@ from tianji_wuji_runtime.runtime.robot_interface import (
     RobotError,
     make_robot,
 )
+from tianji_wuji_runtime.runtime import schema
 from tianji_wuji_runtime.runtime.safety import SafetyConfig, SafetyError, SafetyLayer
+
+
+def _parse_optional_joint_list(raw: str | None) -> tuple[float, ...] | None:
+    if raw is None:
+        return None
+    values = np.fromstring(raw, sep=",", dtype=np.float32)
+    if values.size != schema.LEFT_HAND_DOF:
+        raise ValueError(
+            f"hand home pose must provide {schema.LEFT_HAND_DOF} comma-separated values, "
+            f"got {values.size}"
+        )
+    return tuple(float(v) for v in values.tolist())
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--robot-limits",
+        default=str(RUNTIME_ROOT / "configs" / "robot_limits.yaml"),
+    )
     parser.add_argument("--policy-host", default="127.0.0.1")
     parser.add_argument("--policy-port", type=int, default=5555)
     parser.add_argument("--policy-timeout-ms", type=int, default=15000)
@@ -43,6 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera", action="append", default=[])
     parser.add_argument("--image-source", default=None)
     parser.add_argument("--save-video", action="store_true")
+    parser.add_argument("--robot-ip", default=None)
     parser.add_argument("--left-arm-ip", default=None)
     parser.add_argument("--left-arm-port", type=int, default=None)
     parser.add_argument("--right-arm-ip", default=None)
@@ -51,6 +71,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--left-hand-port", type=int, default=None)
     parser.add_argument("--right-hand-ip", default=None)
     parser.add_argument("--right-hand-port", type=int, default=None)
+    parser.add_argument("--left-hand-serial", default=None)
+    parser.add_argument("--right-hand-serial", default=None)
+    parser.add_argument("--left-hand-home", default=None)
+    parser.add_argument("--right-hand-home", default=None)
+    parser.add_argument("--hand-lowpass-cutoff-hz", type=float, default=5.0)
+    parser.add_argument("--tianji-sdk-root", default=None)
+    parser.add_argument("--tianji-config-path", default=None)
     parser.add_argument("--max-arm-joint-step", type=float, default=3.0)
     parser.add_argument("--max-hand-joint-step", type=float, default=4.5)
     parser.add_argument("--max-arm-velocity", type=float, default=None)
@@ -103,6 +130,7 @@ def main() -> int:
     robot = make_robot(
         RobotConnectionConfig(
             backend=args.robot_backend,
+            robot_ip=args.robot_ip,
             left_arm_ip=args.left_arm_ip,
             left_arm_port=args.left_arm_port,
             right_arm_ip=args.right_arm_ip,
@@ -111,14 +139,26 @@ def main() -> int:
             left_hand_port=args.left_hand_port,
             right_hand_ip=args.right_hand_ip,
             right_hand_port=args.right_hand_port,
+            left_hand_serial=args.left_hand_serial,
+            right_hand_serial=args.right_hand_serial,
+            left_hand_home=_parse_optional_joint_list(args.left_hand_home),
+            right_hand_home=_parse_optional_joint_list(args.right_hand_home),
+            hand_lowpass_cutoff_hz=args.hand_lowpass_cutoff_hz,
+            tianji_sdk_root=args.tianji_sdk_root,
+            tianji_config_path=args.tianji_config_path,
         )
     )
-    safety_config = SafetyConfig.permissive(
-        arm_max_step=args.max_arm_joint_step,
-        hand_max_step=args.max_hand_joint_step,
-        arm_max_velocity=args.max_arm_velocity,
-        hand_max_velocity=args.max_hand_velocity,
-    )
+    safety_config = SafetyConfig.from_yaml(args.robot_limits)
+    safety_config.arm_max_step = args.max_arm_joint_step
+    safety_config.hand_max_step = args.max_hand_joint_step
+    if args.max_arm_velocity is not None:
+        safety_config.arm_max_velocity = np.full(
+            schema.LEFT_ARM_DOF, args.max_arm_velocity, dtype=np.float32
+        )
+    if args.max_hand_velocity is not None:
+        safety_config.hand_max_velocity = np.full(
+            schema.LEFT_HAND_DOF, args.max_hand_velocity, dtype=np.float32
+        )
     safety_config.enable_filter = args.use_filter
     safety = SafetyLayer(safety_config, adapter)
     recorder = Recorder(

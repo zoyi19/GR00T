@@ -26,3 +26,9 @@ arm_max_step: 3.0
 hand_max_step: 4.5
 arm_max_velocity: null
 hand_max_velocity: null
+enable_arm_joint_limit: true
+enable_hand_joint_limit: false
+enable_arm_delta_clip: true
+enable_hand_delta_clip: false
+enable_arm_velocity_limit: true
+enable_hand_velocity_limit: false

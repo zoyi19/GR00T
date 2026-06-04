@@ -7,10 +7,14 @@ real SDK implementation. All methods use 7 joint positions in schema order.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from . import schema
+
+if TYPE_CHECKING:
+    from .tianji_arm_system import TianjiDualArmSystem
 
 
 class ArmError(RuntimeError):
@@ -22,6 +26,8 @@ class ArmConnectionConfig:
     side: str
     ip: str | None = None
     port: int | None = None
+    sdk_root: str | None = None
+    config_path: str | None = None
     unit: str = schema.STATE_UNIT
 
 
@@ -32,12 +38,21 @@ class ArmInterface:
     def disconnect(self) -> None:
         pass
 
+    def shared_resource_id(self) -> object:
+        return id(self)
+
     def get_joint_state(self) -> np.ndarray:
         """Return 7-dim joint positions."""
         raise NotImplementedError
 
     def send_joint_position(self, q: np.ndarray) -> None:
         raise NotImplementedError
+
+    def stage_joint_position(self, q: np.ndarray) -> None:
+        self.send_joint_position(q)
+
+    def flush_staged_commands(self) -> None:
+        return None
 
     def hold_position(self) -> None:
         raise NotImplementedError
@@ -75,3 +90,38 @@ class FakeArmInterface(ArmInterface):
     def go_home(self) -> None:
         self.q[:] = 0.0
 
+
+class TianjiArmInterface(ArmInterface):
+    """Side-specific view over a shared Tianji dual-arm host controller."""
+
+    def __init__(self, config: ArmConnectionConfig, system: TianjiDualArmSystem) -> None:
+        self.config = config
+        self.system = system
+
+    def connect(self) -> None:
+        self.system.connect()
+
+    def disconnect(self) -> None:
+        self.system.disconnect()
+
+    def shared_resource_id(self) -> object:
+        return self.system.shared_resource_id()
+
+    def get_joint_state(self) -> np.ndarray:
+        return self.system.get_joint_state(self.config.side)
+
+    def send_joint_position(self, q: np.ndarray) -> None:
+        self.stage_joint_position(q)
+        self.flush_staged_commands()
+
+    def stage_joint_position(self, q: np.ndarray) -> None:
+        self.system.stage_joint_position(self.config.side, q)
+
+    def flush_staged_commands(self) -> None:
+        self.system.flush_staged_commands()
+
+    def hold_position(self) -> None:
+        self.system.hold_position()
+
+    def go_home(self) -> None:
+        self.system.go_home()

@@ -24,6 +24,10 @@ from tianji_wuji_runtime.runtime.safety import SafetyConfig, SafetyLayer
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--robot-limits",
+        default=str(RUNTIME_ROOT / "configs" / "robot_limits.yaml"),
+    )
     parser.add_argument("--policy-host", default="127.0.0.1")
     parser.add_argument("--policy-port", type=int, default=5555)
     parser.add_argument("--policy-timeout-ms", type=int, default=15000)
@@ -59,10 +63,9 @@ def main() -> int:
         allow_dummy=True,
     )
     robot = make_robot(RobotConnectionConfig(backend="fake"))
-    safety_config = SafetyConfig.permissive(
-        arm_max_step=args.max_arm_joint_step,
-        hand_max_step=args.max_hand_joint_step,
-    )
+    safety_config = SafetyConfig.from_yaml(args.robot_limits)
+    safety_config.arm_max_step = args.max_arm_joint_step
+    safety_config.hand_max_step = args.max_hand_joint_step
     safety = SafetyLayer(safety_config, adapter)
     recorder = Recorder(
         args.record_dir,

@@ -21,6 +21,7 @@ execution:
 
 robot:
   backend: fake
+  robot_ip: null
   left_arm_ip: null
   left_arm_port: null
   right_arm_ip: null
@@ -29,6 +30,13 @@ robot:
   left_hand_port: null
   right_hand_ip: null
   right_hand_port: null
+  left_hand_serial: null
+  right_hand_serial: null
+  left_hand_home: null
+  right_hand_home: null
+  hand_lowpass_cutoff_hz: 5.0
+  tianji_sdk_root: /home/user/workspace/DexProj_back_up_0602/wuji-hand-teleop/src/output_devices/tianji_output
+  tianji_config_path: /home/user/workspace/DexProj_back_up_0602/wuji-hand-teleop/src/output_devices/tianji_output/tianji_output/config/ccs_m6.MvKDCfg
 
 logging:
   record_dir: ./infer_logs

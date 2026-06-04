@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
+import yaml
 
 from . import schema
 from .action_adapter import ActionAdapter, DualArmHandAction
@@ -29,12 +31,62 @@ class SafetyConfig:
     hand_max_step: float
     arm_max_velocity: np.ndarray | None = None
     hand_max_velocity: np.ndarray | None = None
-    enable_joint_limit: bool = True
-    enable_delta_clip: bool = True
-    enable_velocity_limit: bool = True
+    enable_arm_joint_limit: bool = True
+    enable_hand_joint_limit: bool = False
+    enable_arm_delta_clip: bool = True
+    enable_hand_delta_clip: bool = False
+    enable_arm_velocity_limit: bool = True
+    enable_hand_velocity_limit: bool = False
     enable_filter: bool = False
     filter_alpha: float = 0.35
     max_consecutive_events: int = 20
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> "SafetyConfig":
+        cfg_path = Path(path)
+        with cfg_path.open("r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+
+        def _vector(name: str, dim: int) -> np.ndarray:
+            value = raw.get(name)
+            if value is None:
+                raise ValueError(f"missing required safety config field: {name}")
+            arr = np.asarray(value, dtype=np.float32)
+            if arr.shape != (dim,):
+                raise ValueError(f"{name} must have shape ({dim},), got {arr.shape}")
+            return arr
+
+        def _optional_limit(name: str, dim: int) -> np.ndarray | None:
+            value = raw.get(name)
+            if value is None:
+                return None
+            if np.isscalar(value):
+                return np.full(dim, float(value), dtype=np.float32)
+            arr = np.asarray(value, dtype=np.float32)
+            if arr.shape != (dim,):
+                raise ValueError(f"{name} must have shape ({dim},), got {arr.shape}")
+            return arr
+
+        return cls(
+            left_arm_joint_min=_vector("left_arm_joint_min", schema.LEFT_ARM_DOF),
+            left_arm_joint_max=_vector("left_arm_joint_max", schema.LEFT_ARM_DOF),
+            left_hand_joint_min=_vector("left_hand_joint_min", schema.LEFT_HAND_DOF),
+            left_hand_joint_max=_vector("left_hand_joint_max", schema.LEFT_HAND_DOF),
+            right_arm_joint_min=_vector("right_arm_joint_min", schema.RIGHT_ARM_DOF),
+            right_arm_joint_max=_vector("right_arm_joint_max", schema.RIGHT_ARM_DOF),
+            right_hand_joint_min=_vector("right_hand_joint_min", schema.RIGHT_HAND_DOF),
+            right_hand_joint_max=_vector("right_hand_joint_max", schema.RIGHT_HAND_DOF),
+            arm_max_step=float(raw.get("arm_max_step", 3.0)),
+            hand_max_step=float(raw.get("hand_max_step", 4.5)),
+            arm_max_velocity=_optional_limit("arm_max_velocity", schema.LEFT_ARM_DOF),
+            hand_max_velocity=_optional_limit("hand_max_velocity", schema.LEFT_HAND_DOF),
+            enable_arm_joint_limit=bool(raw.get("enable_arm_joint_limit", True)),
+            enable_hand_joint_limit=bool(raw.get("enable_hand_joint_limit", False)),
+            enable_arm_delta_clip=bool(raw.get("enable_arm_delta_clip", True)),
+            enable_hand_delta_clip=bool(raw.get("enable_hand_delta_clip", False)),
+            enable_arm_velocity_limit=bool(raw.get("enable_arm_velocity_limit", True)),
+            enable_hand_velocity_limit=bool(raw.get("enable_hand_velocity_limit", False)),
+        )
 
     @classmethod
     def permissive(
@@ -95,16 +147,36 @@ class SafetyLayer:
     ) -> tuple[DualArmHandAction, list[dict[str, object]]]:
         cfg = self.config
         events: list[dict[str, object]] = []
-        if not cfg.enable_joint_limit:
-            return action.copy(), events
         clipped = action.copy()
         limit_specs = {
-            "left_arm": (cfg.left_arm_joint_min, cfg.left_arm_joint_max, clipped.left_arm_q),
-            "left_hand": (cfg.left_hand_joint_min, cfg.left_hand_joint_max, clipped.left_hand_q),
-            "right_arm": (cfg.right_arm_joint_min, cfg.right_arm_joint_max, clipped.right_arm_q),
-            "right_hand": (cfg.right_hand_joint_min, cfg.right_hand_joint_max, clipped.right_hand_q),
+            "left_arm": (
+                cfg.enable_arm_joint_limit,
+                cfg.left_arm_joint_min,
+                cfg.left_arm_joint_max,
+                clipped.left_arm_q,
+            ),
+            "left_hand": (
+                cfg.enable_hand_joint_limit,
+                cfg.left_hand_joint_min,
+                cfg.left_hand_joint_max,
+                clipped.left_hand_q,
+            ),
+            "right_arm": (
+                cfg.enable_arm_joint_limit,
+                cfg.right_arm_joint_min,
+                cfg.right_arm_joint_max,
+                clipped.right_arm_q,
+            ),
+            "right_hand": (
+                cfg.enable_hand_joint_limit,
+                cfg.right_hand_joint_min,
+                cfg.right_hand_joint_max,
+                clipped.right_hand_q,
+            ),
         }
-        for name, (lo, hi, arr) in limit_specs.items():
+        for name, (enabled, lo, hi, arr) in limit_specs.items():
+            if not enabled:
+                continue
             before = arr.copy()
             arr[:] = np.clip(arr, lo, hi)
             if not np.allclose(before, arr):
@@ -116,8 +188,6 @@ class SafetyLayer:
         current_state: DualArmHandState | np.ndarray,
         action: DualArmHandAction,
     ) -> tuple[DualArmHandAction, list[dict[str, object]]]:
-        if not self.config.enable_delta_clip:
-            return action.copy(), []
         current = self.adapter.split_state(current_state)
         return self._clip_against_reference(current, action)
 
@@ -127,17 +197,19 @@ class SafetyLayer:
         action: DualArmHandAction,
         dt: float,
     ) -> tuple[DualArmHandAction, list[dict[str, object]]]:
-        if not self.config.enable_velocity_limit or dt <= 0:
+        if dt <= 0:
             return action.copy(), []
         cfg = self.config
         clipped = action.copy()
         events: list[dict[str, object]] = []
-        for segment, limit in (
-            ("left_arm", cfg.arm_max_velocity),
-            ("right_arm", cfg.arm_max_velocity),
-            ("left_hand", cfg.hand_max_velocity),
-            ("right_hand", cfg.hand_max_velocity),
+        for segment, enabled, limit in (
+            ("left_arm", cfg.enable_arm_velocity_limit, cfg.arm_max_velocity),
+            ("right_arm", cfg.enable_arm_velocity_limit, cfg.arm_max_velocity),
+            ("left_hand", cfg.enable_hand_velocity_limit, cfg.hand_max_velocity),
+            ("right_hand", cfg.enable_hand_velocity_limit, cfg.hand_max_velocity),
         ):
+            if not enabled:
+                continue
             if limit is None:
                 continue
             prev = getattr(previous_action, f"{segment}_q")
@@ -199,16 +271,16 @@ class SafetyLayer:
         action: DualArmHandAction,
     ) -> tuple[DualArmHandAction, list[dict[str, object]]]:
         cfg = self.config
-        if not cfg.enable_delta_clip:
-            return action.copy(), []
         clipped = action.copy()
         events: list[dict[str, object]] = []
-        for segment, max_step in (
-            ("left_arm", cfg.arm_max_step),
-            ("right_arm", cfg.arm_max_step),
-            ("left_hand", cfg.hand_max_step),
-            ("right_hand", cfg.hand_max_step),
+        for segment, enabled, max_step in (
+            ("left_arm", cfg.enable_arm_delta_clip, cfg.arm_max_step),
+            ("right_arm", cfg.enable_arm_delta_clip, cfg.arm_max_step),
+            ("left_hand", cfg.enable_hand_delta_clip, cfg.hand_max_step),
+            ("right_hand", cfg.enable_hand_delta_clip, cfg.hand_max_step),
         ):
+            if not enabled:
+                continue
             ref = getattr(reference, f"{segment}_q")
             cur = getattr(clipped, f"{segment}_q")
             before = cur.copy()

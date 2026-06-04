@@ -25,6 +25,10 @@ from tianji_wuji_runtime.runtime.safety import SafetyConfig, SafetyLayer
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--robot-limits",
+        default=str(RUNTIME_ROOT / "configs" / "robot_limits.yaml"),
+    )
     parser.add_argument("--action-file", required=True)
     parser.add_argument("--duration", type=float, default=0.05)
     parser.add_argument("--safe-mode", action="store_true")
@@ -49,10 +53,9 @@ def main() -> int:
 
     adapter = ActionAdapter(action_mode=args.action_mode)
     robot = make_robot(RobotConnectionConfig(backend=args.robot_backend))
-    safety_config = SafetyConfig.permissive(
-        arm_max_step=args.max_arm_joint_step,
-        hand_max_step=args.max_hand_joint_step,
-    )
+    safety_config = SafetyConfig.from_yaml(args.robot_limits)
+    safety_config.arm_max_step = args.max_arm_joint_step
+    safety_config.hand_max_step = args.max_hand_joint_step
     safety = SafetyLayer(safety_config, adapter)
     recorder = Recorder(
         args.record_dir,

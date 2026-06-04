@@ -34,21 +34,47 @@ DEFAULT_ACTION_FILE = (
 )
 
 
+def _parse_optional_joint_list(raw: str | None) -> tuple[float, ...] | None:
+    if raw is None:
+        return None
+    values = np.fromstring(raw, sep=",", dtype=np.float32)
+    if values.size != schema.LEFT_HAND_DOF:
+        raise ValueError(
+            f"hand home pose must provide {schema.LEFT_HAND_DOF} comma-separated values, "
+            f"got {values.size}"
+        )
+    return tuple(float(v) for v in values.tolist())
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--action-file", default=str(DEFAULT_ACTION_FILE))
+    parser.add_argument(
+        "--robot-limits",
+        default=str(RUNTIME_ROOT / "configs" / "robot_limits.yaml"),
+    )
     parser.add_argument("--hz", type=float, default=20.0)
     parser.add_argument("--start-step", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--robot-backend", default="fake")
+    parser.add_argument("--robot-ip", default=None)
+    parser.add_argument("--left-hand-serial", default=None)
+    parser.add_argument("--right-hand-serial", default=None)
+    parser.add_argument("--left-hand-home", default=None)
+    parser.add_argument("--right-hand-home", default=None)
+    parser.add_argument("--hand-lowpass-cutoff-hz", type=float, default=5.0)
+    parser.add_argument("--tianji-sdk-root", default=None)
+    parser.add_argument("--tianji-config-path", default=None)
     parser.add_argument("--action-mode", choices=["absolute", "delta"], default="absolute")
     parser.add_argument(
         "--with-safety",
         action="store_true",
-        help="Apply the same permissive safety layer used by replay_policy_check.py.",
+        help="Apply the YAML-backed runtime safety layer before sending actions.",
     )
-    parser.add_argument("--max-arm-joint-step", type=float, default=0.05)
-    parser.add_argument("--max-hand-joint-step", type=float, default=0.08)
+    parser.add_argument("--max-arm-joint-step", type=float, default=None)
+    parser.add_argument("--max-hand-joint-step", type=float, default=None)
+    parser.add_argument("--max-arm-velocity", type=float, default=None)
+    parser.add_argument("--max-hand-velocity", type=float, default=None)
     parser.add_argument(
         "--output-dir",
         default=str(RUNTIME_ROOT / "test" / "action_replay" / "send_logs"),
@@ -66,7 +92,19 @@ def main() -> int:
     dt = 1.0 / float(args.hz)
     raw_chunk = _load_action_chunk(Path(args.action_file), args.start_step, args.max_steps)
     adapter = ActionAdapter(action_mode=args.action_mode)
-    robot = make_robot(RobotConnectionConfig(backend=args.robot_backend))
+    robot = make_robot(
+        RobotConnectionConfig(
+            backend=args.robot_backend,
+            robot_ip=args.robot_ip,
+            left_hand_serial=args.left_hand_serial,
+            right_hand_serial=args.right_hand_serial,
+            left_hand_home=_parse_optional_joint_list(args.left_hand_home),
+            right_hand_home=_parse_optional_joint_list(args.right_hand_home),
+            hand_lowpass_cutoff_hz=args.hand_lowpass_cutoff_hz,
+            tianji_sdk_root=args.tianji_sdk_root,
+            tianji_config_path=args.tianji_config_path,
+        )
+    )
 
     actions = adapter.split_chunk(raw_chunk)
     safety_events: list[dict[str, object]] = []
@@ -82,10 +120,23 @@ def main() -> int:
         state_before_chunk = robot.get_state()
         send_actions = actions
         if args.with_safety:
-            safety_config = SafetyConfig.permissive(
-                arm_max_step=args.max_arm_joint_step,
-                hand_max_step=args.max_hand_joint_step,
-            )
+            safety_config = SafetyConfig.from_yaml(args.robot_limits)
+            if args.max_arm_joint_step is not None:
+                safety_config.arm_max_step = args.max_arm_joint_step
+            if args.max_hand_joint_step is not None:
+                safety_config.hand_max_step = args.max_hand_joint_step
+            if args.max_arm_velocity is not None:
+                safety_config.arm_max_velocity = np.full(
+                    schema.LEFT_ARM_DOF,
+                    args.max_arm_velocity,
+                    dtype=np.float32,
+                )
+            if args.max_hand_velocity is not None:
+                safety_config.hand_max_velocity = np.full(
+                    schema.LEFT_HAND_DOF,
+                    args.max_hand_velocity,
+                    dtype=np.float32,
+                )
             safety = SafetyLayer(safety_config, adapter)
             send_actions, safety_events = safety.process_chunk(
                 state_before_chunk,
