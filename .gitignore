@@ -168,3 +168,59 @@ offline_open_loop_eval_plots/
 # Generic model/data folders
 /models
 /data
+
+# ============================================================
+# Local project additions (wuji dual-arm fork)
+#   .venv/ , /models , /data are already covered above.
+# ============================================================
+
+# --- Model checkpoints & exported weights ---
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.bin
+checkpoint-*/
+checkpoints/
+last-checkpoint/
+# Exported inference artifacts (ONNX / TensorRT)
+*.onnx
+*.engine
+*.plan
+*.trt
+
+# --- Datasets / recordings (LeRobot raw + processed) ---
+experiment_data/
+*.parquet
+*.mp4
+*.h5
+*.hdf5
+*.arrow
+*.tfrecord*
+# Keep upstream-tracked fixtures & README assets (these dirs ARE committed)
+!demo_data/**
+!media/**
+
+# --- Markdown notes (keep project/upstream documentation) ---
+*.md
+!README.md
+!**/README.md
+!CLAUDE.md
+!AGENTS.md
+!CONTRIBUTING.md
+!FAQ.md
+!ATTRIBUTIONS.md
+!getting_started/*.md
+!.github/**/*.md
+
+# --- Secrets / credentials / archives (suggested) ---
+.env
+.env.*
+*.pem
+*.key
+secrets.*
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
