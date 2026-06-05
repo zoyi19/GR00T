@@ -28,7 +28,11 @@ from tianji_wuji_runtime.runtime.control_overrides import (
 from tianji_wuji_runtime.runtime.executor import ActionExecutor
 from tianji_wuji_runtime.runtime.groot_policy_client import GrootPolicyClient, PolicyServerError
 from tianji_wuji_runtime.runtime.keyboard import KeyboardController, RuntimeState, RuntimeStateMachine
-from tianji_wuji_runtime.runtime.observation_builder import ObservationBuilder, ObservationError
+from tianji_wuji_runtime.runtime.observation_builder import (
+    ObservationBuilder,
+    ObservationError,
+    validate_policy_inputs,
+)
 from tianji_wuji_runtime.runtime.recorder import Recorder
 from tianji_wuji_runtime.runtime.robot_interface import (
     RobotConnectionConfig,
@@ -431,6 +435,11 @@ def main() -> int:
                         max_age_ms=args.max_camera_age_ms,
                     )
                     images = {key: frame.image for key, frame in frames.items()}
+                    robot_state = validate_policy_inputs(
+                        robot_state,
+                        images,
+                        required_camera_keys=obs_builder.required_camera_keys,
+                    )
                     observation = obs_builder.build(robot_state, images, args.task)
                     raw_chunk = policy.predict_action_chunk(
                         observation,

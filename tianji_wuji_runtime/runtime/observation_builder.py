@@ -26,6 +26,39 @@ STATE_GROUP_KEYS = {
 }
 
 
+def validate_policy_inputs(
+    state: DualArmHandState | np.ndarray,
+    images: Mapping[str, np.ndarray],
+    *,
+    required_camera_keys: tuple[str, ...] | list[str],
+) -> DualArmHandState:
+    """Validate the full robot-state + RGB-image input before policy inference."""
+    try:
+        checked_state = ensure_state(state)
+    except Exception as exc:  # noqa: BLE001
+        raise ObservationError(f"invalid robot state before policy inference: {exc}") from exc
+
+    state_segments = {
+        "left_arm": (checked_state.left_arm_q, schema.LEFT_ARM_DOF),
+        "right_arm": (checked_state.right_arm_q, schema.RIGHT_ARM_DOF),
+        "left_hand": (checked_state.left_hand_q, schema.LEFT_HAND_DOF),
+        "right_hand": (checked_state.right_hand_q, schema.RIGHT_HAND_DOF),
+    }
+    for name, (values, dim) in state_segments.items():
+        arr = np.asarray(values, dtype=np.float32)
+        if arr.shape != (dim,):
+            raise ObservationError(f"robot state {name} must have shape ({dim},), got {arr.shape}")
+        if not np.all(np.isfinite(arr)):
+            raise ObservationError(f"robot state {name} contains NaN or Inf")
+
+    missing = [key for key in required_camera_keys if key not in images]
+    if missing:
+        raise ObservationError(f"missing camera image(s) before policy inference: {missing}")
+    for key in required_camera_keys:
+        _validate_rgb_image(images[key], key)
+    return checked_state
+
+
 def build_policy_observation(
     state: "DualArmHandState | np.ndarray",
     images: Mapping[str, np.ndarray],
@@ -49,10 +82,7 @@ def build_policy_observation(
     for key in video_keys:
         if key not in images:
             raise ObservationError(f"missing required camera image {key!r}")
-        arr = np.asarray(images[key])
-        if arr.dtype != np.uint8 or arr.ndim != 3 or arr.shape[-1] != 3:
-            raise ObservationError(f"image {key} must be uint8 HxWx3 RGB, got {arr.shape}/{arr.dtype}")
-        out[f"video.{key}"] = np.ascontiguousarray(arr)[None, None, ...]
+        out[f"video.{key}"] = _validate_rgb_image(images[key], key)[None, None, ...]
     for model_key, group in STATE_GROUP_KEYS.items():
         segment = schema.SEGMENTS[group]
         out[f"state.{model_key}"] = (
@@ -140,14 +170,7 @@ class ObservationBuilder:
 
     @staticmethod
     def _validate_image(image: np.ndarray, key: str) -> np.ndarray:
-        arr = np.asarray(image)
-        if arr.dtype != np.uint8:
-            raise ObservationError(f"image {key} must be uint8 RGB, got {arr.dtype}")
-        if arr.ndim != 3 or arr.shape[-1] != 3:
-            raise ObservationError(f"image {key} must be HxWx3 RGB, got {arr.shape}")
-        if not np.all(np.isfinite(arr)):
-            raise ObservationError(f"image {key} contains non-finite values")
-        return np.ascontiguousarray(arr)
+        return _validate_rgb_image(image, key)
 
     @staticmethod
     def _stack_history(buffer: deque[np.ndarray], horizon: int, name: str) -> np.ndarray:
@@ -157,3 +180,14 @@ class ObservationBuilder:
         while len(values) < horizon:
             values.insert(0, values[0])
         return np.stack(values[-horizon:], axis=0)
+
+
+def _validate_rgb_image(image: np.ndarray, key: str) -> np.ndarray:
+    arr = np.asarray(image)
+    if arr.dtype != np.uint8:
+        raise ObservationError(f"image {key} must be uint8 RGB, got {arr.dtype}")
+    if arr.ndim != 3 or arr.shape[-1] != 3:
+        raise ObservationError(f"image {key} must be HxWx3 RGB, got {arr.shape}")
+    if not np.all(np.isfinite(arr)):
+        raise ObservationError(f"image {key} contains non-finite values")
+    return np.ascontiguousarray(arr)
