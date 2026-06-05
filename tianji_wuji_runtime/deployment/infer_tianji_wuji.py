@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import sys
 import time
@@ -13,11 +14,17 @@ import numpy as np
 
 RUNTIME_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = RUNTIME_ROOT.parent
+DEFAULT_LEFT_FREEZE_TARGET_PATH = RUNTIME_ROOT / "configs" / "left_freeze_defaults.json"
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(RUNTIME_ROOT))
 
 from tianji_wuji_runtime.runtime.action_adapter import ActionAdapter, ActionAdapterError
 from tianji_wuji_runtime.runtime.camera_manager import CameraError, CameraManager
+from tianji_wuji_runtime.runtime.control_overrides import (
+    ControlOverrideError,
+    LeftSideFreezeTarget,
+    apply_left_side_freeze,
+)
 from tianji_wuji_runtime.runtime.executor import ActionExecutor
 from tianji_wuji_runtime.runtime.groot_policy_client import GrootPolicyClient, PolicyServerError
 from tianji_wuji_runtime.runtime.keyboard import KeyboardController, RuntimeState, RuntimeStateMachine
@@ -44,6 +51,71 @@ def _parse_optional_joint_list(raw: str | None) -> tuple[float, ...] | None:
     return tuple(float(v) for v in values.tolist())
 
 
+def _parse_optional_vector(raw: str | None, *, dim: int, name: str) -> np.ndarray | None:
+    if raw is None:
+        return None
+    values = np.fromstring(raw, sep=",", dtype=np.float32)
+    if values.size != dim:
+        raise ValueError(f"{name} must provide {dim} comma-separated values, got {values.size}")
+    if not np.all(np.isfinite(values)):
+        raise ValueError(f"{name} contains NaN or Inf")
+    return values.astype(np.float32, copy=True)
+
+
+def _load_left_freeze_target(path: Path) -> LeftSideFreezeTarget:
+    if not path.exists():
+        raise ControlOverrideError(f"left freeze target file does not exist: {path}")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise ControlOverrideError(f"failed to read left freeze target file {path}: {exc}") from exc
+    try:
+        return LeftSideFreezeTarget(
+            left_arm_q=np.asarray(raw["left_arm"], dtype=np.float32),
+            left_hand_q=np.asarray(raw["left_hand"], dtype=np.float32),
+            source=f"file:{path}",
+        )
+    except KeyError as exc:
+        raise ControlOverrideError(
+            f"left freeze target file {path} must contain left_arm and left_hand"
+        ) from exc
+
+
+def _resolve_freeze_segment(
+    *,
+    cli_value: np.ndarray | None,
+    file_value: np.ndarray | None,
+    current_value: np.ndarray | None,
+    name: str,
+) -> np.ndarray:
+    if cli_value is not None:
+        return cli_value.copy()
+    if file_value is not None:
+        return file_value.copy()
+    if current_value is not None:
+        return np.asarray(current_value, dtype=np.float32).copy()
+    raise ControlOverrideError(f"no freeze target available for {name}")
+
+
+def _freeze_segment_source(*, cli_value: str | None, use_current: bool) -> str:
+    if cli_value is not None:
+        return "cli"
+    if use_current:
+        return "current_state"
+    return "default_json"
+
+
+def _freeze_target_source(args: argparse.Namespace, file_target: LeftSideFreezeTarget | None) -> str:
+    if args.freeze_left_arm is not None or args.freeze_left_hand is not None:
+        base = "current_state" if args.freeze_left_use_current else (file_target.source if file_target else "none")
+        return f"cli_override+{base}"
+    if args.freeze_left_use_current:
+        return "current_state"
+    if file_target is not None:
+        return file_target.source
+    return "unknown"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -61,6 +133,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--record-dir", default=str(RUNTIME_ROOT / "infer_logs"))
     parser.add_argument("--camera", action="append", default=[])
     parser.add_argument("--image-source", default=None)
+    parser.add_argument("--camera-fps", type=float, default=20.0)
+    parser.add_argument("--camera-width", type=int, default=424)
+    parser.add_argument("--camera-height", type=int, default=240)
+    parser.add_argument("--head-stereo-crop", choices=["left", "right"], default=None)
+    parser.add_argument("--max-camera-age-ms", type=float, default=150.0)
+    parser.add_argument("--camera-warmup-sec", type=float, default=3.0)
     parser.add_argument("--save-video", action="store_true")
     parser.add_argument("--robot-ip", default=None)
     parser.add_argument("--left-arm-ip", default=None)
@@ -89,6 +167,42 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action-mode", choices=["absolute", "delta"], default="absolute")
     parser.add_argument("--policy-unit", default="deg")
     parser.add_argument("--control-unit", default="deg")
+    parser.add_argument(
+        "--freeze-left-side",
+        action="store_true",
+        help=(
+            "Right-side-only control mode: keep left arm and left hand fixed while "
+            "still feeding/predicting the full 54-DoF policy contract."
+        ),
+    )
+    parser.add_argument(
+        "--freeze-left-arm",
+        default=None,
+        help=(
+            "Optional 7 comma-separated left-arm target for --freeze-left-side. "
+            "If omitted, the target comes from --freeze-left-target-path unless "
+            "--freeze-left-use-current is set."
+        ),
+    )
+    parser.add_argument(
+        "--freeze-left-hand",
+        default=None,
+        help=(
+            "Optional 20 comma-separated left-hand target for --freeze-left-side. "
+            "If omitted, the target comes from --freeze-left-target-path unless "
+            "--freeze-left-use-current is set."
+        ),
+    )
+    parser.add_argument(
+        "--freeze-left-target-path",
+        default=str(DEFAULT_LEFT_FREEZE_TARGET_PATH),
+        help="Default left-side freeze target JSON used by --freeze-left-side.",
+    )
+    parser.add_argument(
+        "--freeze-left-use-current",
+        action="store_true",
+        help="Use the current left arm + left hand state as the freeze target instead of JSON defaults.",
+    )
     parser.add_argument("--max-chunks", type=int, default=None)
     return parser.parse_args()
 
@@ -101,6 +215,16 @@ def main() -> int:
         raise ValueError("--duration must be positive")
     if args.no_keyboard and not args.auto_start:
         raise ValueError("--no-keyboard requires --auto-start so execution is explicit")
+    if not args.freeze_left_side and (
+        args.freeze_left_arm is not None or args.freeze_left_hand is not None
+        or args.freeze_left_use_current
+    ):
+        raise ValueError(
+            "--freeze-left-arm/--freeze-left-hand/--freeze-left-use-current "
+            "require --freeze-left-side"
+        )
+    if args.freeze_left_side and args.action_mode != "absolute":
+        raise ValueError("--freeze-left-side expects --action-mode absolute")
     if args.safe_mode and args.execution_horizon > 2:
         print("[runtime] warning: initial safe execution should use --execution-horizon 1 or 2")
     if not args.dry_run and args.robot_backend == "fake":
@@ -126,6 +250,10 @@ def main() -> int:
         required_keys=obs_builder.required_camera_keys,
         image_source=args.image_source,
         allow_dummy=args.dry_run,
+        width=args.camera_width,
+        height=args.camera_height,
+        fps=args.camera_fps,
+        head_stereo_crop=args.head_stereo_crop,
     )
     robot = make_robot(
         RobotConnectionConfig(
@@ -177,6 +305,22 @@ def main() -> int:
             "camera": args.camera,
             "image_source": args.image_source,
             "robot_backend": args.robot_backend,
+            "control_overrides": {
+                "freeze_left_side": args.freeze_left_side,
+                "freeze_left_arm_source": (
+                    _freeze_segment_source(
+                        cli_value=args.freeze_left_arm,
+                        use_current=args.freeze_left_use_current,
+                    )
+                ),
+                "freeze_left_hand_source": (
+                    _freeze_segment_source(
+                        cli_value=args.freeze_left_hand,
+                        use_current=args.freeze_left_use_current,
+                    )
+                ),
+                "freeze_left_target_path": args.freeze_left_target_path,
+            },
             "modality": {
                 name: {
                     "keys": list(cfg.modality_keys),
@@ -195,9 +339,54 @@ def main() -> int:
     print("[runtime] controls: R run, P pause, Space hold, H home, N next safe chunk, Q quit")
 
     chunk_count = 0
+    left_freeze_target: LeftSideFreezeTarget | None = None
     try:
         robot.connect()
+        if args.freeze_left_side:
+            current_state = robot.get_state() if args.freeze_left_use_current else None
+            file_target = (
+                None
+                if args.freeze_left_use_current
+                else _load_left_freeze_target(Path(args.freeze_left_target_path))
+            )
+            freeze_arm = _parse_optional_vector(
+                args.freeze_left_arm,
+                dim=schema.LEFT_ARM_DOF,
+                name="--freeze-left-arm",
+            )
+            freeze_hand = _parse_optional_vector(
+                args.freeze_left_hand,
+                dim=schema.LEFT_HAND_DOF,
+                name="--freeze-left-hand",
+            )
+            left_freeze_target = LeftSideFreezeTarget(
+                left_arm_q=(
+                    _resolve_freeze_segment(
+                        cli_value=freeze_arm,
+                        file_value=None if file_target is None else file_target.left_arm_q,
+                        current_value=None if current_state is None else current_state.left_arm_q,
+                        name="left_arm",
+                    )
+                ),
+                left_hand_q=(
+                    _resolve_freeze_segment(
+                        cli_value=freeze_hand,
+                        file_value=None if file_target is None else file_target.left_hand_q,
+                        current_value=None if current_state is None else current_state.left_hand_q,
+                        name="left_hand",
+                    )
+                ),
+                source=_freeze_target_source(args, file_target),
+            )
+            _write_json(recorder.run_dir / "left_freeze_target.json", left_freeze_target.as_dict())
+            print(
+                "[runtime] freeze-left-side enabled: "
+                f"left_arm={left_freeze_target.left_arm_q.tolist()}, "
+                f"left_hand={left_freeze_target.left_hand_q.tolist()}"
+            )
         cameras.connect_all()
+        cameras.start_streaming()
+        cameras.wait_until_ready(timeout_sec=args.camera_warmup_sec)
         with KeyboardController(enabled=not args.no_keyboard) as keyboard:
             def stop_requested() -> bool:
                 state_machine.update(keyboard.poll())
@@ -217,7 +406,7 @@ def main() -> int:
                 H      命令机器人回 home
                 Q      退出整个 runtime，并断开资源
                 N      safe-mode 下放行下一段，执行完又暂停
-                """ 
+                """
                 state_machine.update(keyboard.poll())
                 if state_machine.home_requested:
                     robot.go_home()
@@ -233,19 +422,33 @@ def main() -> int:
                 safe_actions = []
                 safety_events = []
                 try:
+                    state_t0 = time.perf_counter()
                     robot_state = robot.get_state()
-                    images = cameras.read()
+                    state_t1 = time.perf_counter()
+                    reference_time = 0.5 * (state_t0 + state_t1)
+                    frames = cameras.snapshot_latest(
+                        reference_time=reference_time,
+                        max_age_ms=args.max_camera_age_ms,
+                    )
+                    images = {key: frame.image for key, frame in frames.items()}
                     observation = obs_builder.build(robot_state, images, args.task)
                     raw_chunk = policy.predict_action_chunk(
                         observation,
                         min_horizon=args.execution_horizon,
                     )
                     actions = adapter.split_chunk(raw_chunk)
+                    override_events: list[dict[str, object]] = []
+                    if left_freeze_target is not None:
+                        actions, override_events = apply_left_side_freeze(
+                            actions,
+                            left_freeze_target,
+                        )
                     safe_actions, safety_events = safety.process_chunk(
                         robot_state,
                         actions,
                         args.duration,
                     )
+                    safety_events = override_events + safety_events
                     recorder.save_chunk(
                         observation=observation,
                         raw_chunk=raw_chunk,
@@ -269,6 +472,7 @@ def main() -> int:
                 except (
                     ActionAdapterError,
                     CameraError,
+                    ControlOverrideError,
                     ObservationError,
                     PolicyServerError,
                     RobotError,
@@ -283,9 +487,31 @@ def main() -> int:
         print("\n[runtime] interrupted")
     finally:
         robot.hold_position()
+        cameras.stop_streaming()
         cameras.disconnect_all()
         robot.disconnect()
     return 0
+
+
+def _write_json(path: Path, payload: object) -> None:
+    path.write_text(
+        json.dumps(_to_jsonable(payload), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _to_jsonable(value: object) -> object:
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(k): _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(v) for v in value]
+    if isinstance(value, Path):
+        return str(value)
+    return value
 
 
 if __name__ == "__main__":

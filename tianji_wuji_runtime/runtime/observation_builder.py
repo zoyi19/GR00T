@@ -16,6 +16,51 @@ class ObservationError(RuntimeError):
     """Raised when observations cannot be built safely."""
 
 
+# Fixed GR00T policy input contract for the Tianji Wuji checkpoint (delta_indices=[0]).
+VIDEO_KEYS = ("head", "left_wrist", "right_wrist")
+STATE_GROUP_KEYS = {
+    "left_arm_joint": "left_arm",
+    "right_arm_joint": "right_arm",
+    "left_hand": "left_hand",
+    "right_hand": "right_hand",
+}
+
+
+def build_policy_observation(
+    state: "DualArmHandState | np.ndarray",
+    images: Mapping[str, np.ndarray],
+    *,
+    video_keys: tuple[str, ...] = VIDEO_KEYS,
+) -> dict[str, np.ndarray]:
+    """Build a policy-ready observation dict using the fixed contract.
+
+    Unlike :class:`ObservationBuilder`, this needs no policy-server modality config,
+    so offline tools (e.g. the observation capture script) can produce arrays whose
+    shapes match the live policy input:
+
+        video.<key>          -> uint8  (1, 1, H, W, 3)
+        state.left_arm_joint -> float32 (1, 1, 7)
+        state.right_arm_joint-> float32 (1, 1, 7)
+        state.left_hand      -> float32 (1, 1, 20)
+        state.right_hand     -> float32 (1, 1, 20)
+    """
+    flat = ensure_state(state).as_flat()
+    out: dict[str, np.ndarray] = {}
+    for key in video_keys:
+        if key not in images:
+            raise ObservationError(f"missing required camera image {key!r}")
+        arr = np.asarray(images[key])
+        if arr.dtype != np.uint8 or arr.ndim != 3 or arr.shape[-1] != 3:
+            raise ObservationError(f"image {key} must be uint8 HxWx3 RGB, got {arr.shape}/{arr.dtype}")
+        out[f"video.{key}"] = np.ascontiguousarray(arr)[None, None, ...]
+    for model_key, group in STATE_GROUP_KEYS.items():
+        segment = schema.SEGMENTS[group]
+        out[f"state.{model_key}"] = (
+            flat[segment.vector_slice].astype(np.float32)[None, None, ...]
+        )
+    return out
+
+
 class ObservationBuilder:
     def __init__(
         self,

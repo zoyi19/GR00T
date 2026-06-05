@@ -1,0 +1,28 @@
+{
+  "created_wall_time": 1780589969.2204983,
+  "created_iso": "2026-06-05T00:19:29.220498",
+  "robot_backend": "fake",
+  "robot_ip": null,
+  "left_hand_serial": null,
+  "right_hand_serial": null,
+  "camera": [
+    "head:/dev/video4",
+    "left_wrist:/dev/video10",
+    "right_wrist:/dev/video16"
+  ],
+  "camera_width": 424,
+  "camera_height": 240,
+  "camera_fps": 20.0,
+  "head_stereo_crop": null,
+  "max_camera_age_ms": 150.0,
+  "camera_keys": [
+    "head",
+    "left_wrist",
+    "right_wrist"
+  ],
+  "samples": 20,
+  "sample_hz": 1.0,
+  "task": "check cameras",
+  "state_unit": "deg",
+  "schema_order": "left_arm,right_arm,left_hand,right_hand"
+}
