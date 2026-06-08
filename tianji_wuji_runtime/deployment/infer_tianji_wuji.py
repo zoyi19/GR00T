@@ -51,6 +51,7 @@ from tianji_wuji_runtime.runtime.robot_interface import (
     RobotError,
     make_robot,
 )
+from tianji_wuji_runtime.runtime.ros2_jointstate_publisher import Ros2JointStatePublisher
 from tianji_wuji_runtime.runtime.safety import SafetyConfig, SafetyError, SafetyLayer
 
 
@@ -246,6 +247,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--policy-unit", default="deg")
     parser.add_argument("--control-unit", default="deg")
     parser.add_argument(
+        "--ros2-publish-jointstate",
+        action="store_true",
+        help="Publish per-step target and position JointState topics for PlotJuggler.",
+    )
+    parser.add_argument(
+        "--ros2-jointstate-prefix",
+        default="/gr00t_runtime",
+        help="ROS 2 topic prefix used by --ros2-publish-jointstate.",
+    )
+    parser.add_argument(
         "--freeze-left-side",
         action="store_true",
         help=(
@@ -407,8 +418,19 @@ def main() -> int:
     runtime_events_path = recorder.run_dir / "runtime_events.jsonl"
     runtime_event_logger = RuntimeEventLogger(runtime_events_path)
     log_event = runtime_event_logger.log
+    ros_publisher = (
+        Ros2JointStatePublisher(topic_prefix=args.ros2_jointstate_prefix)
+        if args.ros2_publish_jointstate
+        else None
+    )
 
-    executor = ActionExecutor(robot, adapter=adapter, recorder=recorder, event_logger=log_event)
+    executor = ActionExecutor(
+        robot,
+        adapter=adapter,
+        recorder=recorder,
+        event_logger=log_event,
+        ros_publisher=ros_publisher,
+    )
     keepalive = ActionKeepalive(robot, event_logger=log_event)
     state_machine = RuntimeStateMachine(auto_start=args.auto_start, safe_mode=args.safe_mode)
 
@@ -425,6 +447,8 @@ def main() -> int:
         max_camera_age_ms=args.max_camera_age_ms,
         freeze_left_side=args.freeze_left_side,
         dry_run=args.dry_run,
+        ros2_publish_jointstate=args.ros2_publish_jointstate,
+        ros2_jointstate_prefix=args.ros2_jointstate_prefix,
     )
 
     chunk_count = 0
@@ -755,6 +779,13 @@ def main() -> int:
                         chunk_index=chunk_index,
                         chunk_dir=str(chunk_dir),
                     )
+                    if not reached_max_chunks:
+                        log_event(
+                            "chunk_replan_delay",
+                            chunk_index=chunk_index,
+                            sleep_sec=0.15,
+                        )
+                        time.sleep(0.15)
                     if reached_max_chunks:
                         break
                 except (
@@ -812,6 +843,8 @@ def main() -> int:
         robot.hold_position()
         cameras.stop_streaming()
         cameras.disconnect_all()
+        if ros_publisher is not None:
+            ros_publisher.close()
         robot.disconnect()
         log_event("runtime_cleanup_end")
         runtime_event_logger.close()

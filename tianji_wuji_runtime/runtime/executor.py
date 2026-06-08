@@ -10,6 +10,7 @@ import numpy as np
 from .action_adapter import ActionAdapter, DualArmHandAction
 from .recorder import Recorder
 from .robot_interface import DualArmHandRobot, RobotError
+from .ros2_jointstate_publisher import Ros2JointStatePublisher
 
 
 class ActionExecutor:
@@ -20,11 +21,13 @@ class ActionExecutor:
         adapter: ActionAdapter,
         recorder: Recorder | None = None,
         event_logger: Callable[..., None] | None = None,
+        ros_publisher: Ros2JointStatePublisher | None = None,
     ) -> None:
         self.robot = robot
         self.adapter = adapter
         self.recorder = recorder
         self.event_logger = event_logger
+        self.ros_publisher = ros_publisher
 
     def execute_chunk(
         self,
@@ -71,6 +74,11 @@ class ActionExecutor:
                 state_after_t0 = time.perf_counter()
                 state_after = self.robot.get_state()
                 state_after_t1 = time.perf_counter()
+                if self.ros_publisher is not None:
+                    self.ros_publisher.publish(
+                        target_action=action,
+                        current_state=state_after,
+                    )
             except RobotError as exc:
                 error = repr(exc)
                 self.robot.hold_position()
