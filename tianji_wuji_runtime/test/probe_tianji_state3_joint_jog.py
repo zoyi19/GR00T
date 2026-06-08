@@ -20,15 +20,9 @@ from typing import Any, Callable
 
 
 DEFAULT_SDK_ROOT = Path(
-    "/home/user/workspace/DexProj_back_up_0602/"
-    "wuji-hand-teleop/src/output_devices/tianji_output"
+    "/home/user/workspace/DexProj_back_up_0602/wuji-hand-teleop/src/output_devices/tianji_output"
 )
-DEFAULT_OUTPUT_DIR = (
-    Path(__file__).resolve().parents[1]
-    / "test"
-    / "action_replay"
-    / "send_logs"
-)
+DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[1] / "test" / "action_replay" / "send_logs"
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,8 +39,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--jog-deg", type=float, default=1.0)
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--hz", type=float, default=50.0)
-    parser.add_argument("--vel-ratio", type=int, default=20)
-    parser.add_argument("--acc-ratio", type=int, default=10)
+    parser.add_argument("--vel-ratio", type=int, default=100)
+    parser.add_argument("--acc-ratio", type=int, default=100)
     parser.add_argument("--settle-sec", type=float, default=0.5)
     parser.add_argument("--hold-sec", type=float, default=0.5)
     parser.add_argument("--read-every", type=int, default=5)
@@ -125,7 +119,9 @@ def main() -> int:
         _append_trace(trace_path, "after_enable", after_enable, target_by_arm=current)
 
         hold_targets = _current_joints_by_arm(after_enable)
-        _hold_current(robot, hold_targets, seconds=args.hold_sec, hz=args.hz, strict=args.strict_sdk_return)
+        _hold_current(
+            robot, hold_targets, seconds=args.hold_sec, hz=args.hz, strict=args.strict_sdk_return
+        )
         after_hold = _read_feedback(robot, dcss)
         _print_snapshot("after_hold", after_hold, target_by_arm=hold_targets)
         _append_trace(trace_path, "after_hold", after_hold, target_by_arm=hold_targets)
@@ -287,7 +283,8 @@ def _jog_selected_joint(
             ratio = (index + 1) / float(args.steps)
             command = {
                 side: [
-                    float(begin[side][joint]) + ratio * (float(end[side][joint]) - float(begin[side][joint]))
+                    float(begin[side][joint])
+                    + ratio * (float(end[side][joint]) - float(begin[side][joint]))
                     for joint in range(7)
                 ]
                 for side in ("A", "B")

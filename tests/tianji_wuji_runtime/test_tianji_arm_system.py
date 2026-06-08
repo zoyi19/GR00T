@@ -1,5 +1,4 @@
 import numpy as np
-
 from tianji_wuji_runtime.runtime.tianji_arm_system import TianjiDualArmSystem, TianjiHostConfig
 
 
@@ -12,6 +11,9 @@ class _FakeRobot:
 
     def clear_error(self, arm: str) -> None:
         self.calls.append(("clear_error", arm))
+
+    def set_vel_acc(self, arm: str, velRatio: int, AccRatio: int) -> None:  # noqa: N803
+        self.calls.append(("set_vel_acc", (arm, velRatio, AccRatio)))
 
     def send_cmd(self) -> None:
         self.calls.append(("send_cmd", None))
@@ -84,6 +86,10 @@ def test_connect_prepares_joint_control_and_caches_hold(monkeypatch, tmp_path) -
         ("clear_set", None),
         ("clear_error", "A"),
         ("clear_error", "B"),
+        ("send_cmd", None),
+        ("clear_set", None),
+        ("set_vel_acc", ("A", 100, 100)),
+        ("set_vel_acc", ("B", 100, 100)),
         ("send_cmd", None),
     ]
     assert controller.set_impedance_mode_calls == ["joint"]

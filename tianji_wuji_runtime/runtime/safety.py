@@ -76,7 +76,7 @@ class SafetyConfig:
             right_arm_joint_max=_vector("right_arm_joint_max", schema.RIGHT_ARM_DOF),
             right_hand_joint_min=_vector("right_hand_joint_min", schema.RIGHT_HAND_DOF),
             right_hand_joint_max=_vector("right_hand_joint_max", schema.RIGHT_HAND_DOF),
-            arm_max_step=float(raw.get("arm_max_step", 3.0)),
+            arm_max_step=float(raw.get("arm_max_step", 10.0)),
             hand_max_step=float(raw.get("hand_max_step", 4.5)),
             arm_max_velocity=_optional_limit("arm_max_velocity", schema.LEFT_ARM_DOF),
             hand_max_velocity=_optional_limit("hand_max_velocity", schema.LEFT_HAND_DOF),
@@ -92,7 +92,7 @@ class SafetyConfig:
     def permissive(
         cls,
         *,
-        arm_max_step: float = 3.0,
+        arm_max_step: float = 10.0,
         hand_max_step: float = 4.5,
         arm_max_velocity: float | None = None,
         hand_max_velocity: float | None = None,
@@ -259,9 +259,7 @@ class SafetyLayer:
 
             self._consecutive_events = self._consecutive_events + 1 if step_events else 0
             if self._consecutive_events >= self.config.max_consecutive_events:
-                raise SafetyError(
-                    f"too many consecutive safety events: {self._consecutive_events}"
-                )
+                raise SafetyError(f"too many consecutive safety events: {self._consecutive_events}")
 
         return processed, all_events
 

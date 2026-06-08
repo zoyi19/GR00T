@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--record-dir", default=str(RUNTIME_ROOT / "infer_logs" / "replay"))
     parser.add_argument("--max-steps", type=int, default=None)
-    parser.add_argument("--max-arm-joint-step", type=float, default=3.0)
+    parser.add_argument("--max-arm-joint-step", type=float, default=10.0)
     parser.add_argument("--max-hand-joint-step", type=float, default=4.5)
     parser.add_argument("--robot-backend", default="fake")
     parser.add_argument("--action-mode", choices=["absolute", "delta"], default="absolute")

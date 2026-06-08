@@ -19,11 +19,12 @@ from . import schema
 # Settling delay between SDK state transitions during the idle-reset/enable handshake.
 # Mirrors the known-good DexProj state=3 probe path.
 _IDLE_RESET_SETTLE_SEC = 0.5
+_JOINT_VEL_RATIO = 100
+_JOINT_ACC_RATIO = 100
 
 
 DEFAULT_TIANJI_SDK_ROOT = Path(
-    "/home/user/workspace/DexProj_back_up_0602/"
-    "wuji-hand-teleop/src/output_devices/tianji_output"
+    "/home/user/workspace/DexProj_back_up_0602/wuji-hand-teleop/src/output_devices/tianji_output"
 )
 DEFAULT_TIANJI_CONFIG_PATH = DEFAULT_TIANJI_SDK_ROOT / "tianji_output/config/ccs_m6.MvKDCfg"
 
@@ -177,6 +178,7 @@ class TianjiDualArmSystem:
             self._clear_robot_errors_and_prime_feedback(controller)
             self._idle_reset_arms(controller)
             controller.set_impedance_mode(mode="joint")
+            self._set_joint_velocity_acceleration(controller)
             left, right = controller.get_current_joints()
         except Exception as exc:  # noqa: BLE001
             raise TianjiHostError(
@@ -210,6 +212,21 @@ class TianjiDualArmSystem:
         clear_set()
         clear_error("A")
         clear_error("B")
+        send_cmd()
+
+    def _set_joint_velocity_acceleration(self, controller: Any) -> None:
+        robot = getattr(controller, "robot", None)
+        if robot is None:
+            return
+        clear_set = getattr(robot, "clear_set", None)
+        set_vel_acc = getattr(robot, "set_vel_acc", None)
+        send_cmd = getattr(robot, "send_cmd", None)
+        if not all(callable(fn) for fn in (clear_set, set_vel_acc, send_cmd)):
+            return
+
+        clear_set()
+        set_vel_acc(arm="A", velRatio=_JOINT_VEL_RATIO, AccRatio=_JOINT_ACC_RATIO)
+        set_vel_acc(arm="B", velRatio=_JOINT_VEL_RATIO, AccRatio=_JOINT_ACC_RATIO)
         send_cmd()
 
     def _idle_reset_arms(self, controller: Any) -> None:

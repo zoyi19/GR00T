@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import threading
 
 import numpy as np
 
 from . import schema
 from .action_adapter import DualArmHandAction
 from .arm_interface import ArmConnectionConfig, ArmInterface, FakeArmInterface, TianjiArmInterface
-from .hand_interface import FakeHandInterface, HandConnectionConfig, HandInterface, WujiDirectHandInterface
+from .hand_interface import (
+    FakeHandInterface,
+    HandConnectionConfig,
+    HandInterface,
+    WujiDirectHandInterface,
+)
 from .robot_state import DualArmHandState
 from .tianji_arm_system import TianjiDualArmSystem, TianjiHostConfig
 
@@ -54,70 +60,78 @@ class DualArmHandRobot:
         self.right_arm = right_arm
         self.right_hand = right_hand
         self._connected = False
+        self._io_lock = threading.RLock()
 
     def connect(self) -> None:
-        try:
-            self._call_once(
-                (self.left_arm, self.left_hand, self.right_arm, self.right_hand),
-                "connect",
-            )
-            self._connected = True
-        except Exception as exc:  # noqa: BLE001 - SDKs throw mixed exception types.
-            self.hold_position()
-            raise RobotError(f"failed to connect robot interfaces: {exc}") from exc
+        with self._io_lock:
+            try:
+                self._call_once(
+                    (self.left_arm, self.left_hand, self.right_arm, self.right_hand),
+                    "connect",
+                )
+                self._connected = True
+            except Exception as exc:  # noqa: BLE001 - SDKs throw mixed exception types.
+                self.hold_position()
+                raise RobotError(f"failed to connect robot interfaces: {exc}") from exc
 
     def disconnect(self) -> None:
-        self._call_once(
-            (self.left_arm, self.left_hand, self.right_arm, self.right_hand),
-            "disconnect",
-            ignore_errors=True,
-        )
-        self._connected = False
+        with self._io_lock:
+            self._call_once(
+                (self.left_arm, self.left_hand, self.right_arm, self.right_hand),
+                "disconnect",
+                ignore_errors=True,
+            )
+            self._connected = False
 
     def is_connected(self) -> bool:
-        return self._connected
+        with self._io_lock:
+            return self._connected
 
     def get_state(self) -> DualArmHandState:
-        try:
-            return DualArmHandState(
-                left_arm_q=self.left_arm.get_joint_state(),
-                right_arm_q=self.right_arm.get_joint_state(),
-                left_hand_q=self.left_hand.get_joint_state(),
-                right_hand_q=self.right_hand.get_joint_state(),
-            )
-        except Exception as exc:  # noqa: BLE001
-            self.hold_position()
-            raise RobotError(f"failed to read robot state: {exc}") from exc
+        with self._io_lock:
+            try:
+                return DualArmHandState(
+                    left_arm_q=self.left_arm.get_joint_state(),
+                    right_arm_q=self.right_arm.get_joint_state(),
+                    left_hand_q=self.left_hand.get_joint_state(),
+                    right_hand_q=self.right_hand.get_joint_state(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.hold_position()
+                raise RobotError(f"failed to read robot state: {exc}") from exc
 
     def send_action(self, action: DualArmHandAction) -> None:
         if not isinstance(action, DualArmHandAction):
             raise RobotError(f"send_action expects DualArmHandAction, got {type(action)!r}")
-        try:
-            self.left_arm.stage_joint_position(action.left_arm_q)
-            self.left_hand.send_joint_position(action.left_hand_q)
-            self.right_arm.stage_joint_position(action.right_arm_q)
-            self.right_hand.send_joint_position(action.right_hand_q)
-            self._flush_arm_commands()
-        except Exception as exc:  # noqa: BLE001
-            self.hold_position()
-            raise RobotError(f"failed to send robot action: {exc}") from exc
+        with self._io_lock:
+            try:
+                self.left_arm.stage_joint_position(action.left_arm_q)
+                self.left_hand.send_joint_position(action.left_hand_q)
+                self.right_arm.stage_joint_position(action.right_arm_q)
+                self.right_hand.send_joint_position(action.right_hand_q)
+                self._flush_arm_commands()
+            except Exception as exc:  # noqa: BLE001
+                self.hold_position()
+                raise RobotError(f"failed to send robot action: {exc}") from exc
 
     def hold_position(self) -> None:
-        self._call_once(
-            (self.left_arm, self.left_hand, self.right_arm, self.right_hand),
-            "hold_position",
-            ignore_errors=True,
-        )
-
-    def go_home(self) -> None:
-        try:
+        with self._io_lock:
             self._call_once(
                 (self.left_arm, self.left_hand, self.right_arm, self.right_hand),
-                "go_home",
+                "hold_position",
+                ignore_errors=True,
             )
-        except Exception as exc:  # noqa: BLE001
-            self.hold_position()
-            raise RobotError(f"failed to go home: {exc}") from exc
+
+    def go_home(self) -> None:
+        with self._io_lock:
+            try:
+                self._call_once(
+                    (self.left_arm, self.left_hand, self.right_arm, self.right_hand),
+                    "go_home",
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.hold_position()
+                raise RobotError(f"failed to go home: {exc}") from exc
 
     def _flush_arm_commands(self) -> None:
         seen: set[object] = set()
@@ -129,7 +143,9 @@ class DualArmHandRobot:
             arm.flush_staged_commands()
 
     @staticmethod
-    def _call_once(parts: tuple[object, ...], method_name: str, *, ignore_errors: bool = False) -> None:
+    def _call_once(
+        parts: tuple[object, ...], method_name: str, *, ignore_errors: bool = False
+    ) -> None:
         seen: set[object] = set()
         for part in parts:
             resource_id = getattr(part, "shared_resource_id", lambda: id(part))()

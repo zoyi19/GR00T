@@ -22,7 +22,7 @@ right_hand_joint_max:
   [360.0, 360.0, 360.0, 360.0, 360.0, 360.0, 360.0, 360.0, 360.0, 360.0,
    360.0, 360.0, 360.0, 360.0, 360.0, 360.0, 360.0, 360.0, 360.0, 360.0]
 
-arm_max_step: 3.0
+arm_max_step: 10.0
 hand_max_step: 4.5
 arm_max_velocity: null
 hand_max_velocity: null

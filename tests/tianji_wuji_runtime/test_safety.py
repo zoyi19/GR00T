@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import numpy as np
-
 from tianji_wuji_runtime.runtime import schema
 from tianji_wuji_runtime.runtime.action_adapter import ActionAdapter, DualArmHandAction
 from tianji_wuji_runtime.runtime.robot_state import DualArmHandState
@@ -30,6 +29,7 @@ def test_safety_config_loads_robot_limits_yaml() -> None:
     assert config.enable_hand_delta_clip is False
     assert config.enable_arm_velocity_limit is True
     assert config.enable_hand_velocity_limit is False
+    assert config.arm_max_step == 10.0
     assert config.arm_max_velocity is None
     assert config.hand_max_velocity is None
 
@@ -65,7 +65,7 @@ def test_safety_config_yaml_scalar_velocity_expands(tmp_path: Path) -> None:
 
 def test_default_safety_clips_arm_but_not_hand() -> None:
     adapter = ActionAdapter()
-    config = SafetyConfig.permissive(arm_max_step=3.0, hand_max_step=4.5)
+    config = SafetyConfig.permissive(arm_max_step=10.0, hand_max_step=4.5)
     safety = SafetyLayer(config, adapter)
     current = DualArmHandState(
         left_arm_q=np.zeros(schema.LEFT_ARM_DOF, dtype=np.float32),
@@ -82,8 +82,16 @@ def test_default_safety_clips_arm_but_not_hand() -> None:
 
     processed, events = safety.process_chunk(current, [action], dt=0.05)
 
-    assert np.allclose(processed[0].left_arm_q, np.full(schema.LEFT_ARM_DOF, 3.0, dtype=np.float32))
-    assert np.allclose(processed[0].right_arm_q, np.full(schema.RIGHT_ARM_DOF, -3.0, dtype=np.float32))
-    assert np.allclose(processed[0].left_hand_q, np.full(schema.LEFT_HAND_DOF, 999.0, dtype=np.float32))
-    assert np.allclose(processed[0].right_hand_q, np.full(schema.RIGHT_HAND_DOF, -999.0, dtype=np.float32))
+    assert np.allclose(
+        processed[0].left_arm_q, np.full(schema.LEFT_ARM_DOF, 10.0, dtype=np.float32)
+    )
+    assert np.allclose(
+        processed[0].right_arm_q, np.full(schema.RIGHT_ARM_DOF, -10.0, dtype=np.float32)
+    )
+    assert np.allclose(
+        processed[0].left_hand_q, np.full(schema.LEFT_HAND_DOF, 999.0, dtype=np.float32)
+    )
+    assert np.allclose(
+        processed[0].right_hand_q, np.full(schema.RIGHT_HAND_DOF, -999.0, dtype=np.float32)
+    )
     assert {event["segment"] for event in events} == {"left_arm", "right_arm"}

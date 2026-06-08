@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import socket
 import sys
 import time
 
@@ -18,16 +19,27 @@ DEFAULT_LEFT_FREEZE_TARGET_PATH = RUNTIME_ROOT / "configs" / "left_freeze_defaul
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(RUNTIME_ROOT))
 
-from tianji_wuji_runtime.runtime.action_adapter import ActionAdapter, ActionAdapterError
+from tianji_wuji_runtime.runtime import schema
+from tianji_wuji_runtime.runtime.action_adapter import (
+    ActionAdapter,
+    ActionAdapterError,
+    DualArmHandAction,
+)
+from tianji_wuji_runtime.runtime.action_keepalive import ActionKeepalive
 from tianji_wuji_runtime.runtime.camera_manager import CameraError, CameraManager
 from tianji_wuji_runtime.runtime.control_overrides import (
     ControlOverrideError,
     LeftSideFreezeTarget,
     apply_left_side_freeze,
 )
+from tianji_wuji_runtime.runtime.event_logger import RuntimeEventLogger
 from tianji_wuji_runtime.runtime.executor import ActionExecutor
 from tianji_wuji_runtime.runtime.groot_policy_client import GrootPolicyClient, PolicyServerError
-from tianji_wuji_runtime.runtime.keyboard import KeyboardController, RuntimeState, RuntimeStateMachine
+from tianji_wuji_runtime.runtime.keyboard import (
+    KeyboardController,
+    RuntimeState,
+    RuntimeStateMachine,
+)
 from tianji_wuji_runtime.runtime.observation_builder import (
     ObservationBuilder,
     ObservationError,
@@ -39,7 +51,6 @@ from tianji_wuji_runtime.runtime.robot_interface import (
     RobotError,
     make_robot,
 )
-from tianji_wuji_runtime.runtime import schema
 from tianji_wuji_runtime.runtime.safety import SafetyConfig, SafetyError, SafetyLayer
 
 
@@ -109,15 +120,72 @@ def _freeze_segment_source(*, cli_value: str | None, use_current: bool) -> str:
     return "default_json"
 
 
-def _freeze_target_source(args: argparse.Namespace, file_target: LeftSideFreezeTarget | None) -> str:
+def _freeze_target_source(
+    args: argparse.Namespace, file_target: LeftSideFreezeTarget | None
+) -> str:
     if args.freeze_left_arm is not None or args.freeze_left_hand is not None:
-        base = "current_state" if args.freeze_left_use_current else (file_target.source if file_target else "none")
+        base = (
+            "current_state"
+            if args.freeze_left_use_current
+            else (file_target.source if file_target else "none")
+        )
         return f"cli_override+{base}"
     if args.freeze_left_use_current:
         return "current_state"
     if file_target is not None:
         return file_target.source
     return "unknown"
+
+
+def _tcp_endpoint_open(host: str, port: int, *, timeout_sec: float = 0.5) -> tuple[bool, str]:
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout_sec):
+            return True, "tcp endpoint is accepting connections"
+    except OSError as exc:
+        return False, str(exc)
+
+
+def _wait_for_policy_client(args: argparse.Namespace) -> GrootPolicyClient:
+    wait_sec = max(float(args.policy_wait_sec), 0.0)
+    deadline = time.perf_counter() + wait_sec
+    last_status = "not checked"
+    next_log_time = 0.0
+
+    print(
+        "[runtime] waiting for policy server "
+        f"{args.policy_host}:{args.policy_port} (timeout {wait_sec:.1f}s)"
+    )
+    while True:
+        endpoint_open, status = _tcp_endpoint_open(args.policy_host, args.policy_port)
+        last_status = status
+        if endpoint_open:
+            policy = GrootPolicyClient(
+                host=args.policy_host,
+                port=args.policy_port,
+                timeout_ms=args.policy_timeout_ms,
+            )
+            if policy.ping():
+                print(f"[runtime] policy server ready: {args.policy_host}:{args.policy_port}")
+                return policy
+            last_status = "tcp endpoint is open, but policy ping failed"
+
+        now = time.perf_counter()
+        if now >= deadline:
+            raise PolicyServerError(
+                "cannot ping policy server "
+                f"{args.policy_host}:{args.policy_port} after {wait_sec:.1f}s; "
+                f"last status: {last_status}. Start the policy server in another terminal, "
+                "for example: `uv run python gr00t/eval/run_gr00t_server.py "
+                "--model-path <CHECKPOINT_PATH> --embodiment-tag <TAG> --host 0.0.0.0 --port 5555`"
+            )
+        if now >= next_log_time:
+            remaining = max(deadline - now, 0.0)
+            print(
+                "[runtime] policy server not ready yet: "
+                f"{last_status}; retrying for {remaining:.1f}s"
+            )
+            next_log_time = now + 5.0
+        time.sleep(min(1.0, max(deadline - now, 0.0)))
 
 
 def parse_args() -> argparse.Namespace:
@@ -129,6 +197,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--policy-host", default="127.0.0.1")
     parser.add_argument("--policy-port", type=int, default=5555)
     parser.add_argument("--policy-timeout-ms", type=int, default=15000)
+    parser.add_argument(
+        "--policy-wait-sec",
+        type=float,
+        default=60.0,
+        help="Seconds to wait for the policy server before connecting robot/cameras.",
+    )
     parser.add_argument("--task", required=True)
     parser.add_argument("--execution-horizon", type=int, default=1)
     parser.add_argument("--duration", type=float, default=0.05)
@@ -160,7 +234,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hand-lowpass-cutoff-hz", type=float, default=5.0)
     parser.add_argument("--tianji-sdk-root", default=None)
     parser.add_argument("--tianji-config-path", default=None)
-    parser.add_argument("--max-arm-joint-step", type=float, default=3.0)
+    parser.add_argument("--max-arm-joint-step", type=float, default=10.0)
     parser.add_argument("--max-hand-joint-step", type=float, default=4.5)
     parser.add_argument("--max-arm-velocity", type=float, default=None)
     parser.add_argument("--max-hand-velocity", type=float, default=None)
@@ -220,7 +294,8 @@ def main() -> int:
     if args.no_keyboard and not args.auto_start:
         raise ValueError("--no-keyboard requires --auto-start so execution is explicit")
     if not args.freeze_left_side and (
-        args.freeze_left_arm is not None or args.freeze_left_hand is not None
+        args.freeze_left_arm is not None
+        or args.freeze_left_hand is not None
         or args.freeze_left_use_current
     ):
         raise ValueError(
@@ -239,13 +314,7 @@ def main() -> int:
         control_unit=args.control_unit,
         action_mode=args.action_mode,
     )
-    policy = GrootPolicyClient(
-        host=args.policy_host,
-        port=args.policy_port,
-        timeout_ms=args.policy_timeout_ms,
-    )
-    if not policy.ping():
-        raise PolicyServerError(f"cannot ping policy server {args.policy_host}:{args.policy_port}")
+    policy = _wait_for_policy_client(args)
     modality_configs = policy.get_modality_config()
     obs_builder = ObservationBuilder(modality_configs)
 
@@ -335,19 +404,50 @@ def main() -> int:
         },
         adapter=adapter,
     )
-    executor = ActionExecutor(robot, adapter=adapter, recorder=recorder)
+    runtime_events_path = recorder.run_dir / "runtime_events.jsonl"
+    runtime_event_logger = RuntimeEventLogger(runtime_events_path)
+    log_event = runtime_event_logger.log
+
+    executor = ActionExecutor(robot, adapter=adapter, recorder=recorder, event_logger=log_event)
+    keepalive = ActionKeepalive(robot, event_logger=log_event)
     state_machine = RuntimeStateMachine(auto_start=args.auto_start, safe_mode=args.safe_mode)
 
     print(f"[runtime] logs: {recorder.run_dir}")
+    print(f"[runtime] events: {runtime_events_path}")
     print(f"[runtime] inference mode: sync, action step: {args.duration:.4f}s")
     print("[runtime] controls: R run, P pause, Space hold, H home, N next safe chunk, Q quit")
+    log_event(
+        "runtime_start",
+        run_dir=str(recorder.run_dir),
+        execution_horizon=args.execution_horizon,
+        duration_sec=args.duration,
+        camera_fps=args.camera_fps,
+        max_camera_age_ms=args.max_camera_age_ms,
+        freeze_left_side=args.freeze_left_side,
+        dry_run=args.dry_run,
+    )
 
     chunk_count = 0
     left_freeze_target: LeftSideFreezeTarget | None = None
     try:
+        log_event("robot_connect_start", backend=args.robot_backend, robot_ip=args.robot_ip)
+        robot_connect_t0 = time.perf_counter()
         robot.connect()
+        log_event(
+            "robot_connect_end",
+            latency_ms=(time.perf_counter() - robot_connect_t0) * 1000.0,
+        )
         if args.freeze_left_side:
-            current_state = robot.get_state() if args.freeze_left_use_current else None
+            if args.freeze_left_use_current:
+                freeze_state_t0 = time.perf_counter()
+                current_state = robot.get_state()
+                freeze_state_t1 = time.perf_counter()
+                log_event(
+                    "freeze_left_state_read",
+                    latency_ms=(freeze_state_t1 - freeze_state_t0) * 1000.0,
+                )
+            else:
+                current_state = None
             file_target = (
                 None
                 if args.freeze_left_use_current
@@ -388,16 +488,48 @@ def main() -> int:
                 f"left_arm={left_freeze_target.left_arm_q.tolist()}, "
                 f"left_hand={left_freeze_target.left_hand_q.tolist()}"
             )
+            log_event(
+                "freeze_left_target",
+                source=left_freeze_target.source,
+                left_arm=left_freeze_target.left_arm_q.tolist(),
+                left_hand=left_freeze_target.left_hand_q.tolist(),
+            )
+        log_event(
+            "camera_connect_start",
+            cameras=list(args.camera),
+            width=args.camera_width,
+            height=args.camera_height,
+            fps=args.camera_fps,
+            warmup_sec=args.camera_warmup_sec,
+        )
+        camera_connect_t0 = time.perf_counter()
         cameras.connect_all()
+        log_event(
+            "camera_connect_end",
+            latency_ms=(time.perf_counter() - camera_connect_t0) * 1000.0,
+        )
+        log_event("camera_stream_start")
         cameras.start_streaming()
-        cameras.wait_until_ready(timeout_sec=args.camera_warmup_sec)
+        camera_ready_t0 = time.perf_counter()
+        warmup_frames = cameras.wait_until_ready(timeout_sec=args.camera_warmup_sec)
+        camera_ready_ref = time.perf_counter()
+        log_event(
+            "camera_ready",
+            latency_ms=(camera_ready_ref - camera_ready_t0) * 1000.0,
+            frames=_frame_debug_summary(warmup_frames, camera_ready_ref),
+        )
         with KeyboardController(enabled=not args.no_keyboard) as keyboard:
+
             def stop_requested() -> bool:
                 state_machine.update(keyboard.poll())
                 if state_machine.home_requested:
+                    log_event("keyboard_home_requested")
+                    keepalive.stop()
                     robot.go_home()
                     state_machine.home_requested = False
                 if state_machine.quit_requested:
+                    log_event("keyboard_quit_requested")
+                    keepalive.stop()
                     robot.hold_position()
                     return True
                 return state_machine.state != RuntimeState.RUNNING
@@ -413,70 +545,217 @@ def main() -> int:
                 """
                 state_machine.update(keyboard.poll())
                 if state_machine.home_requested:
+                    log_event("keyboard_home_requested", chunk_index=chunk_count)
+                    keepalive.stop()
                     robot.go_home()
                     state_machine.home_requested = False
                 if state_machine.quit_requested:
+                    log_event("keyboard_quit_requested", chunk_index=chunk_count)
+                    keepalive.stop()
                     robot.hold_position()
                     break
                 if state_machine.state != RuntimeState.RUNNING:
+                    keepalive.stop()
                     time.sleep(0.01)
                     continue
 
+                chunk_index = chunk_count
                 raw_chunk = None
+                observation = None
                 safe_actions = []
                 safety_events = []
+                chunk_saved = False
                 try:
+                    log_event(
+                        "chunk_loop_start",
+                        chunk_index=chunk_index,
+                        keepalive_running=keepalive.is_running(),
+                    )
+                    keepalive.raise_if_failed()
                     state_t0 = time.perf_counter()
                     robot_state = robot.get_state()
                     state_t1 = time.perf_counter()
                     reference_time = 0.5 * (state_t0 + state_t1)
+                    log_event(
+                        "robot_state_read",
+                        chunk_index=chunk_index,
+                        state_read_start_monotonic=state_t0,
+                        state_read_end_monotonic=state_t1,
+                        reference_monotonic=reference_time,
+                        latency_ms=(state_t1 - state_t0) * 1000.0,
+                    )
+                    snapshot_t0 = time.perf_counter()
                     frames = cameras.snapshot_latest(
                         reference_time=reference_time,
                         max_age_ms=args.max_camera_age_ms,
                     )
+                    snapshot_t1 = time.perf_counter()
+                    log_event(
+                        "camera_snapshot",
+                        chunk_index=chunk_index,
+                        reference_monotonic=reference_time,
+                        snapshot_latency_ms=(snapshot_t1 - snapshot_t0) * 1000.0,
+                        max_camera_age_ms=args.max_camera_age_ms,
+                        frames=_frame_debug_summary(frames, reference_time),
+                    )
                     images = {key: frame.image for key, frame in frames.items()}
+                    observation_t0 = time.perf_counter()
                     robot_state = validate_policy_inputs(
                         robot_state,
                         images,
                         required_camera_keys=obs_builder.required_camera_keys,
                     )
                     observation = obs_builder.build(robot_state, images, args.task)
+                    observation_t1 = time.perf_counter()
+                    log_event(
+                        "observation_ready",
+                        chunk_index=chunk_index,
+                        latency_ms=(observation_t1 - observation_t0) * 1000.0,
+                        age_from_state_reference_ms=(observation_t1 - reference_time) * 1000.0,
+                        image_keys=sorted(images),
+                    )
+                    policy_t0 = time.perf_counter()
+                    log_event(
+                        "policy_predict_start",
+                        chunk_index=chunk_index,
+                        age_from_state_reference_ms=(policy_t0 - reference_time) * 1000.0,
+                    )
                     raw_chunk = policy.predict_action_chunk(
                         observation,
                         min_horizon=args.execution_horizon,
                     )
+                    policy_t1 = time.perf_counter()
+                    log_event(
+                        "policy_predict_end",
+                        chunk_index=chunk_index,
+                        latency_ms=(policy_t1 - policy_t0) * 1000.0,
+                        client_latency_ms=policy.last_latency_ms,
+                        age_from_state_reference_ms=(policy_t1 - reference_time) * 1000.0,
+                        raw_action_shape=list(np.asarray(raw_chunk).shape),
+                    )
                     actions = adapter.split_chunk(raw_chunk)
+                    if actions:
+                        log_event(
+                            "policy_actions_split",
+                            chunk_index=chunk_index,
+                            policy_action_count=len(actions),
+                            executed_horizon=args.execution_horizon,
+                            first_policy_action=_action_debug_summary(actions[0]),
+                            last_policy_action=_action_debug_summary(actions[-1]),
+                        )
                     override_events: list[dict[str, object]] = []
                     if left_freeze_target is not None:
                         actions, override_events = apply_left_side_freeze(
                             actions,
                             left_freeze_target,
                         )
+                        log_event(
+                            "left_freeze_applied",
+                            chunk_index=chunk_index,
+                            event_count=len(override_events),
+                        )
+                    safety_t0 = time.perf_counter()
                     safe_actions, safety_events = safety.process_chunk(
                         robot_state,
                         actions,
                         args.duration,
                     )
+                    safety_t1 = time.perf_counter()
                     safety_events = override_events + safety_events
-                    recorder.save_chunk(
+                    executable_count = min(args.execution_horizon, len(safe_actions))
+                    log_event(
+                        "safety_processed",
+                        chunk_index=chunk_index,
+                        latency_ms=(safety_t1 - safety_t0) * 1000.0,
+                        policy_action_count=len(actions),
+                        safe_action_count=len(safe_actions),
+                        executed_horizon=args.execution_horizon,
+                        executable_count=executable_count,
+                        safety_event_count=len(safety_events),
+                        safety_events_by_type=_event_counts(safety_events),
+                        first_safe_action=(
+                            None if not safe_actions else _action_debug_summary(safe_actions[0])
+                        ),
+                        last_executable_action=(
+                            None
+                            if executable_count <= 0
+                            else _action_debug_summary(safe_actions[executable_count - 1])
+                        ),
+                    )
+                    log_event(
+                        "chunk_execute_prepare",
+                        chunk_index=chunk_index,
+                        keepalive_running_before_stop=keepalive.is_running(),
+                        executable_count=executable_count,
+                    )
+                    keepalive.stop()
+                    execute_t0 = time.perf_counter()
+                    log_event(
+                        "chunk_execute_start",
+                        chunk_index=chunk_index,
+                        action_count=executable_count,
+                        age_from_state_reference_ms=(execute_t0 - reference_time) * 1000.0,
+                    )
+                    last_executed_action = executor.execute_chunk(
+                        safe_actions[: args.execution_horizon],
+                        args.duration,
+                        dry_run=args.dry_run,
+                        chunk_index=chunk_index,
+                        raw_chunk=raw_chunk,
+                        safety_events=safety_events,
+                        stop_callback=stop_requested,
+                    )
+                    execute_t1 = time.perf_counter()
+                    log_event(
+                        "chunk_execute_end",
+                        chunk_index=chunk_index,
+                        latency_ms=(execute_t1 - execute_t0) * 1000.0,
+                        last_executed_action=(
+                            None
+                            if last_executed_action is None
+                            else _action_debug_summary(last_executed_action)
+                        ),
+                    )
+                    chunk_count += 1
+                    state_machine.pause_after_safe_chunk()
+                    reached_max_chunks = (
+                        args.max_chunks is not None and chunk_count >= args.max_chunks
+                    )
+                    if (
+                        last_executed_action is not None
+                        and state_machine.state == RuntimeState.RUNNING
+                        and not reached_max_chunks
+                    ):
+                        keepalive.start(last_executed_action, args.duration)
+                    else:
+                        if last_executed_action is None:
+                            keepalive_reason = "no_last_executed_action"
+                        elif state_machine.state != RuntimeState.RUNNING:
+                            keepalive_reason = f"state_{state_machine.state.value}"
+                        elif reached_max_chunks:
+                            keepalive_reason = "reached_max_chunks"
+                        else:
+                            keepalive_reason = "unknown"
+                        log_event(
+                            "keepalive_not_started",
+                            chunk_index=chunk_index,
+                            reason=keepalive_reason,
+                            reached_max_chunks=reached_max_chunks,
+                        )
+                    chunk_dir = recorder.save_chunk(
                         observation=observation,
                         raw_chunk=raw_chunk,
                         safe_actions=safe_actions,
                         safety_events=safety_events,
                         inference_latency_ms=policy.last_latency_ms,
                     )
-                    executor.execute_chunk(
-                        safe_actions[: args.execution_horizon],
-                        args.duration,
-                        dry_run=args.dry_run,
-                        chunk_index=chunk_count,
-                        raw_chunk=raw_chunk,
-                        safety_events=safety_events,
-                        stop_callback=stop_requested,
+                    chunk_saved = True
+                    log_event(
+                        "chunk_saved",
+                        chunk_index=chunk_index,
+                        chunk_dir=str(chunk_dir),
                     )
-                    chunk_count += 1
-                    state_machine.pause_after_safe_chunk()
-                    if args.max_chunks is not None and chunk_count >= args.max_chunks:
+                    if reached_max_chunks:
                         break
                 except (
                     ActionAdapterError,
@@ -487,7 +766,40 @@ def main() -> int:
                     RobotError,
                     SafetyError,
                 ) as exc:
+                    if (
+                        not chunk_saved
+                        and observation is not None
+                        and raw_chunk is not None
+                    ):
+                        try:
+                            chunk_dir = recorder.save_chunk(
+                                observation=observation,
+                                raw_chunk=raw_chunk,
+                                safe_actions=safe_actions,
+                                safety_events=safety_events,
+                                inference_latency_ms=policy.last_latency_ms,
+                            )
+                            chunk_saved = True
+                            log_event(
+                                "chunk_saved_after_error",
+                                chunk_index=chunk_index,
+                                chunk_dir=str(chunk_dir),
+                            )
+                        except Exception as save_exc:  # noqa: BLE001
+                            log_event(
+                                "chunk_save_failed_after_error",
+                                chunk_index=chunk_index,
+                                error_type=type(save_exc).__name__,
+                                error=str(save_exc),
+                            )
                     print(f"[runtime] ERROR: {exc}")
+                    log_event(
+                        "runtime_error",
+                        chunk_index=chunk_index,
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
+                    keepalive.stop()
                     robot.hold_position()
                     state_machine.to_error()
                     if args.no_keyboard:
@@ -495,11 +807,63 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\n[runtime] interrupted")
     finally:
+        log_event("runtime_cleanup_start", keepalive_running=keepalive.is_running())
+        keepalive.stop()
         robot.hold_position()
         cameras.stop_streaming()
         cameras.disconnect_all()
         robot.disconnect()
+        log_event("runtime_cleanup_end")
+        runtime_event_logger.close()
     return 0
+
+
+def _frame_debug_summary(frames: dict[str, object], reference_time: float) -> dict[str, object]:
+    per_camera: dict[str, dict[str, object]] = {}
+    frame_times: list[float] = []
+    for key, frame in frames.items():
+        monotonic_time = float(getattr(frame, "monotonic_time"))
+        wall_time = float(getattr(frame, "wall_time"))
+        frame_times.append(monotonic_time)
+        per_camera[key] = {
+            "frame_id": int(getattr(frame, "frame_id")),
+            "source": str(getattr(frame, "source")),
+            "width": int(getattr(frame, "width")),
+            "height": int(getattr(frame, "height")),
+            "wall_time": wall_time,
+            "monotonic_time": monotonic_time,
+            "age_ms": (reference_time - monotonic_time) * 1000.0,
+            "delta_from_reference_ms": (monotonic_time - reference_time) * 1000.0,
+        }
+    if frame_times:
+        span_ms: float | None = (max(frame_times) - min(frame_times)) * 1000.0
+    else:
+        span_ms = None
+    return {
+        "per_camera": per_camera,
+        "inter_camera_span_ms": span_ms,
+    }
+
+
+def _action_debug_summary(action: DualArmHandAction) -> dict[str, object]:
+    right_arm = action.right_arm_q
+    right_hand = action.right_hand_q
+    return {
+        "right_arm": right_arm.tolist(),
+        "right_hand": right_hand.tolist(),
+        "right_arm_l2": float((right_arm * right_arm).sum() ** 0.5),
+        "right_hand_l2": float((right_hand * right_hand).sum() ** 0.5),
+    }
+
+
+def _event_counts(events: list[dict[str, object]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for event in events:
+        event_type = str(event.get("type", "unknown"))
+        segment = event.get("segment")
+        key = event_type if segment is None else f"{event_type}:{segment}"
+        counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 def _write_json(path: Path, payload: object) -> None:
