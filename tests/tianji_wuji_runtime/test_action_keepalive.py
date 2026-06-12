@@ -78,3 +78,39 @@ def test_executor_returns_none_in_dry_run() -> None:
 
     assert last_action is None
     assert robot.actions == []
+
+
+def test_executor_cubic_interpolates_arm_commands() -> None:
+    robot = RecordingRobot()
+    executor = ActionExecutor(
+        robot,
+        adapter=ActionAdapter(),
+        arm_interpolation_hz=200.0,
+        arm_interpolation_mode="cubic",
+    )  # type: ignore[arg-type]
+
+    last_action = executor.execute_chunk([_action(10.0)], dt=0.05)
+
+    assert last_action is not None
+    assert len(robot.actions) == 10
+    assert np.allclose(robot.actions[0].right_arm_q, np.full(schema.RIGHT_ARM_DOF, 0.28))
+    assert np.allclose(robot.actions[-1].right_arm_q, np.full(schema.RIGHT_ARM_DOF, 10.0))
+    assert np.allclose(robot.actions[0].right_hand_q, np.full(schema.RIGHT_HAND_DOF, 10.0))
+    assert np.all(np.diff([action.right_arm_q[0] for action in robot.actions]) > 0.0)
+
+
+def test_executor_interpolation_chains_from_last_sent_target() -> None:
+    robot = RecordingRobot()
+    executor = ActionExecutor(
+        robot,
+        adapter=ActionAdapter(),
+        arm_interpolation_hz=200.0,
+        arm_interpolation_mode="cubic",
+    )  # type: ignore[arg-type]
+
+    executor.execute_chunk([_action(10.0), _action(20.0)], dt=0.05)
+
+    assert len(robot.actions) == 20
+    assert np.allclose(robot.actions[9].right_arm_q, np.full(schema.RIGHT_ARM_DOF, 10.0))
+    assert np.allclose(robot.actions[10].right_arm_q, np.full(schema.RIGHT_ARM_DOF, 10.28))
+    assert np.allclose(robot.actions[-1].right_arm_q, np.full(schema.RIGHT_ARM_DOF, 20.0))

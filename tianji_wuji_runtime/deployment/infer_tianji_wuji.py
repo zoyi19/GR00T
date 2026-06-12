@@ -207,6 +207,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task", required=True)
     parser.add_argument("--execution-horizon", type=int, default=1)
     parser.add_argument("--duration", type=float, default=0.05)
+    parser.add_argument(
+        "--arm-interpolation-hz",
+        type=float,
+        default=None,
+        help=(
+            "Optional high-rate arm command interpolation frequency. "
+            "For example, 200 expands each 20 Hz policy step into smooth arm targets."
+        ),
+    )
+    parser.add_argument(
+        "--arm-interpolation-mode",
+        choices=["cubic", "linear"],
+        default="cubic",
+        help="Interpolation curve for --arm-interpolation-hz.",
+    )
     parser.add_argument("--safe-mode", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--record-dir", default=str(RUNTIME_ROOT / "infer_logs"))
@@ -302,6 +317,8 @@ def main() -> int:
         raise ValueError("--execution-horizon must be positive")
     if args.duration <= 0:
         raise ValueError("--duration must be positive")
+    if args.arm_interpolation_hz is not None and args.arm_interpolation_hz <= 0:
+        raise ValueError("--arm-interpolation-hz must be positive when provided")
     if args.no_keyboard and not args.auto_start:
         raise ValueError("--no-keyboard requires --auto-start so execution is explicit")
     if not args.freeze_left_side and (
@@ -384,6 +401,8 @@ def main() -> int:
             "execution_horizon": args.execution_horizon,
             "duration": args.duration,
             "control_frequency_hz": 1.0 / args.duration,
+            "arm_interpolation_hz": args.arm_interpolation_hz,
+            "arm_interpolation_mode": args.arm_interpolation_mode,
             "safe_mode": args.safe_mode,
             "dry_run": args.dry_run,
             "camera": args.camera,
@@ -430,6 +449,8 @@ def main() -> int:
         recorder=recorder,
         event_logger=log_event,
         ros_publisher=ros_publisher,
+        arm_interpolation_hz=args.arm_interpolation_hz,
+        arm_interpolation_mode=args.arm_interpolation_mode,
     )
     keepalive = ActionKeepalive(robot, event_logger=log_event)
     state_machine = RuntimeStateMachine(auto_start=args.auto_start, safe_mode=args.safe_mode)
@@ -443,6 +464,8 @@ def main() -> int:
         run_dir=str(recorder.run_dir),
         execution_horizon=args.execution_horizon,
         duration_sec=args.duration,
+        arm_interpolation_hz=args.arm_interpolation_hz,
+        arm_interpolation_mode=args.arm_interpolation_mode,
         camera_fps=args.camera_fps,
         max_camera_age_ms=args.max_camera_age_ms,
         freeze_left_side=args.freeze_left_side,
