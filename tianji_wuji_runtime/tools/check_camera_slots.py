@@ -18,9 +18,19 @@ from tianji_wuji_runtime.runtime.camera_manager import CameraManager
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--camera", action="append", required=True)
+    parser.add_argument("--camera-width", type=int, default=424)
+    parser.add_argument("--camera-height", type=int, default=240)
+    parser.add_argument("--camera-capture-fps", type=float, default=60.0)
     args = parser.parse_args()
     keys = [spec.split(":", 1)[0] for spec in args.camera]
-    manager = CameraManager.from_cli_specs(args.camera, required_keys=keys, allow_dummy=False)
+    manager = CameraManager.from_cli_specs(
+        args.camera,
+        required_keys=keys,
+        allow_dummy=False,
+        width=args.camera_width,
+        height=args.camera_height,
+        capture_fps=args.camera_capture_fps,
+    )
     manager.connect_all()
     try:
         images = manager.read()
@@ -33,4 +43,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

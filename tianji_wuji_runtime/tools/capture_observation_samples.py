@@ -33,7 +33,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(RUNTIME_ROOT))
 
 from tianji_wuji_runtime.runtime import schema
-from tianji_wuji_runtime.runtime.camera_manager import CameraError, CameraManager, LatestFrame
+from tianji_wuji_runtime.runtime.camera_manager import CameraManager
 from tianji_wuji_runtime.runtime.observation_builder import VIDEO_KEYS, build_policy_observation
 from tianji_wuji_runtime.runtime.robot_interface import RobotConnectionConfig, make_robot
 from tianji_wuji_runtime.runtime.robot_state import DualArmHandState, ensure_state
@@ -66,7 +66,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-source", default=None)
     parser.add_argument("--camera-width", type=int, default=424)
     parser.add_argument("--camera-height", type=int, default=240)
-    parser.add_argument("--camera-fps", type=float, default=20.0)
+    parser.add_argument(
+        "--camera-fps",
+        type=float,
+        default=20.0,
+        help="Python camera-worker processing frequency.",
+    )
+    parser.add_argument("--camera-capture-fps", type=float, default=60.0)
     parser.add_argument("--head-stereo-crop", choices=["left", "right"], default=None)
     parser.add_argument("--max-camera-age-ms", type=float, default=150.0)
     parser.add_argument("--camera-warmup-sec", type=float, default=3.0)
@@ -86,6 +92,10 @@ def main() -> int:
         raise ValueError("--samples must be positive")
     if args.sample_hz <= 0:
         raise ValueError("--sample-hz must be positive")
+    if args.camera_fps <= 0:
+        raise ValueError("--camera-fps must be positive")
+    if args.camera_capture_fps <= 0:
+        raise ValueError("--camera-capture-fps must be positive")
 
     cameras = CameraManager.from_cli_specs(
         args.camera,
@@ -94,6 +104,7 @@ def main() -> int:
         allow_dummy=args.robot_backend == "fake",
         width=args.camera_width,
         height=args.camera_height,
+        capture_fps=args.camera_capture_fps,
         fps=args.camera_fps,
         head_stereo_crop=args.head_stereo_crop,
     )
@@ -270,7 +281,8 @@ def _run_metadata(args: argparse.Namespace, cameras: CameraManager) -> dict[str,
         "camera": [f"{slot.key}:{slot.source}" for slot in cameras.slots],
         "camera_width": args.camera_width,
         "camera_height": args.camera_height,
-        "camera_fps": args.camera_fps,
+        "camera_capture_fps": args.camera_capture_fps,
+        "camera_processing_fps": args.camera_fps,
         "head_stereo_crop": args.head_stereo_crop,
         "max_camera_age_ms": args.max_camera_age_ms,
         "camera_keys": list(VIDEO_KEYS),

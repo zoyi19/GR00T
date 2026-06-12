@@ -11,11 +11,13 @@ import sys
 import time
 
 import numpy as np
+import yaml
 
 
 RUNTIME_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = RUNTIME_ROOT.parent
 DEFAULT_LEFT_FREEZE_TARGET_PATH = RUNTIME_ROOT / "configs" / "left_freeze_defaults.json"
+DEFAULT_INFER_CONFIG_PATH = RUNTIME_ROOT / "configs" / "infer.yaml"
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(RUNTIME_ROOT))
 
@@ -189,8 +191,17 @@ def _wait_for_policy_client(args: argparse.Namespace) -> GrootPolicyClient:
         time.sleep(min(1.0, max(deadline - now, 0.0)))
 
 
-def parse_args() -> argparse.Namespace:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--config",
+        default=str(DEFAULT_INFER_CONFIG_PATH),
+        help=(
+            "YAML/JSON config file. Defaults to "
+            f"{DEFAULT_INFER_CONFIG_PATH}. Keys should use argument dest names such as "
+            "robot_ip, camera, camera_fps. CLI flags still work and override scalar values."
+        ),
+    )
     parser.add_argument(
         "--robot-limits",
         default=str(RUNTIME_ROOT / "configs" / "robot_limits.yaml"),
@@ -227,7 +238,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--record-dir", default=str(RUNTIME_ROOT / "infer_logs"))
     parser.add_argument("--camera", action="append", default=[])
     parser.add_argument("--image-source", default=None)
-    parser.add_argument("--camera-fps", type=float, default=20.0)
+    parser.add_argument(
+        "--camera-fps",
+        type=float,
+        default=20.0,
+        help="Python camera-worker processing frequency; does not change device capture FPS.",
+    )
+    parser.add_argument(
+        "--camera-capture-fps",
+        type=float,
+        default=60.0,
+        help="Native V4L2 device capture frequency configured before the first frame read.",
+    )
     parser.add_argument("--camera-width", type=int, default=424)
     parser.add_argument("--camera-height", type=int, default=240)
     parser.add_argument("--head-stereo-crop", choices=["left", "right"], default=None)
@@ -308,7 +330,91 @@ def parse_args() -> argparse.Namespace:
         help="Use the current left arm + left hand state as the freeze target instead of JSON defaults.",
     )
     parser.add_argument("--max-chunks", type=int, default=None)
-    return parser.parse_args()
+    return parser
+
+
+def _load_cli_config(path: Path) -> dict[str, object]:
+    if not path.exists():
+        raise ValueError(f"config file does not exist: {path}")
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"failed to read config file {path}: {exc}") from exc
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"config file {path} must contain a top-level mapping")
+    return raw
+
+
+def _normalize_config_key(key: str) -> str:
+    return key.strip().replace("-", "_")
+
+
+def _value_to_cli_tokens(
+    *,
+    key: str,
+    value: object,
+    action: argparse.Action,
+) -> list[str]:
+    flag = next(opt for opt in action.option_strings if opt.startswith("--"))
+    if isinstance(action, argparse._AppendAction):
+        if not isinstance(value, list):
+            raise ValueError(f"config key {key!r} must be a list")
+        tokens: list[str] = []
+        for item in value:
+            tokens.extend([flag, str(item)])
+        return tokens
+    if isinstance(action, argparse._StoreTrueAction):
+        if not isinstance(value, bool):
+            raise ValueError(f"config key {key!r} must be true/false")
+        return [flag] if value else []
+    if isinstance(action, argparse._StoreFalseAction):
+        if not isinstance(value, bool):
+            raise ValueError(f"config key {key!r} must be true/false")
+        return [] if value else [flag]
+    if isinstance(value, (list, dict)):
+        raise ValueError(f"config key {key!r} must be a scalar for {flag}")
+    return [flag, str(value)]
+
+
+def _config_to_argv(
+    config_values: dict[str, object],
+    *,
+    parser: argparse.ArgumentParser,
+) -> list[str]:
+    actions = {
+        action.dest: action
+        for action in parser._actions
+        if action.option_strings and action.dest not in {"help", "config"}
+    }
+    argv: list[str] = []
+    for raw_key, value in config_values.items():
+        if not isinstance(raw_key, str):
+            raise ValueError(f"config keys must be strings, got {type(raw_key)!r}")
+        key = _normalize_config_key(raw_key)
+        action = actions.get(key)
+        if action is None:
+            known = ", ".join(sorted(actions))
+            raise ValueError(f"unknown config key {raw_key!r}; known keys: {known}")
+        if value is None:
+            continue
+        argv.extend(_value_to_cli_tokens(key=raw_key, value=value, action=action))
+    return argv
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument("--config", default=str(DEFAULT_INFER_CONFIG_PATH))
+    bootstrap_args, _ = bootstrap.parse_known_args(argv)
+
+    parser = _build_parser()
+    config_argv: list[str] = []
+    if bootstrap_args.config is not None:
+        config_values = _load_cli_config(Path(bootstrap_args.config).expanduser())
+        config_argv = _config_to_argv(config_values, parser=parser)
+    return parser.parse_args(config_argv + argv)
 
 
 def main() -> int:
@@ -319,6 +425,10 @@ def main() -> int:
         raise ValueError("--duration must be positive")
     if args.arm_interpolation_hz is not None and args.arm_interpolation_hz <= 0:
         raise ValueError("--arm-interpolation-hz must be positive when provided")
+    if args.camera_fps <= 0:
+        raise ValueError("--camera-fps must be positive")
+    if args.camera_capture_fps <= 0:
+        raise ValueError("--camera-capture-fps must be positive")
     if args.no_keyboard and not args.auto_start:
         raise ValueError("--no-keyboard requires --auto-start so execution is explicit")
     if not args.freeze_left_side and (
@@ -353,6 +463,7 @@ def main() -> int:
         allow_dummy=args.dry_run,
         width=args.camera_width,
         height=args.camera_height,
+        capture_fps=args.camera_capture_fps,
         fps=args.camera_fps,
         head_stereo_crop=args.head_stereo_crop,
     )
@@ -406,6 +517,8 @@ def main() -> int:
             "safe_mode": args.safe_mode,
             "dry_run": args.dry_run,
             "camera": args.camera,
+            "camera_capture_fps": args.camera_capture_fps,
+            "camera_processing_fps": args.camera_fps,
             "image_source": args.image_source,
             "robot_backend": args.robot_backend,
             "control_overrides": {
@@ -466,7 +579,8 @@ def main() -> int:
         duration_sec=args.duration,
         arm_interpolation_hz=args.arm_interpolation_hz,
         arm_interpolation_mode=args.arm_interpolation_mode,
-        camera_fps=args.camera_fps,
+        camera_capture_fps=args.camera_capture_fps,
+        camera_processing_fps=args.camera_fps,
         max_camera_age_ms=args.max_camera_age_ms,
         freeze_left_side=args.freeze_left_side,
         dry_run=args.dry_run,
@@ -546,7 +660,8 @@ def main() -> int:
             cameras=list(args.camera),
             width=args.camera_width,
             height=args.camera_height,
-            fps=args.camera_fps,
+            capture_fps=args.camera_capture_fps,
+            processing_fps=args.camera_fps,
             warmup_sec=args.camera_warmup_sec,
         )
         camera_connect_t0 = time.perf_counter()

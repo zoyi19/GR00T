@@ -11,9 +11,8 @@ Two acquisition modes are supported:
   the others, and so frames keep updating during policy inference / chunk
   execution.
 
-Every frame returned by this module is uint8 RGB resized to the slot target
-(``width`` x ``height``), so all slots share a consistent shape regardless of the
-device's native resolution.
+Live devices are configured to capture at the slot target resolution before the
+first read. File and dummy sources may still be resized after acquisition.
 """
 
 from __future__ import annotations
@@ -21,6 +20,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+import re
+import subprocess
 import threading
 import time
 from typing import Any
@@ -35,6 +36,9 @@ class CameraError(RuntimeError):
 
 _INITIAL_READ_FAILURE_GRACE_SEC = 2.0
 _MIN_INITIAL_READ_FAILURES = 3
+_CAPTURE_FOURCC = "YUYV"
+_NEGOTIATION_TOLERANCE = 0.5
+_REALSENSE_SOURCE_PREFIX = "realsense:"
 
 
 @dataclass
@@ -43,7 +47,8 @@ class CameraSlotConfig:
     source: str = "dummy"
     width: int = 424
     height: int = 240
-    fps: float = 20.0
+    capture_fps: float = 60.0  # Native device stream rate.
+    fps: float = 20.0  # Python worker processing rate.
     flip_horizontal: bool = False
     flip_vertical: bool = False
     rotate_degrees: int = 0
@@ -87,6 +92,7 @@ class CameraManager:
         allow_dummy: bool = False,
         width: int | None = None,
         height: int | None = None,
+        capture_fps: float | None = None,
         fps: float | None = None,
         head_stereo_crop: str | None = None,
     ) -> "CameraManager":
@@ -110,6 +116,8 @@ class CameraManager:
                 slot.width = int(width)
             if height is not None:
                 slot.height = int(height)
+            if capture_fps is not None:
+                slot.capture_fps = float(capture_fps)
             if fps is not None:
                 slot.fps = float(fps)
             if head_stereo_crop is not None and slot.key == "head":
@@ -121,15 +129,15 @@ class CameraManager:
 
     def connect_all(self) -> None:
         for slot in self.slots:
-            source = slot.source
+            source = _resolve_live_source(slot.source)
             if source in {"dummy", "zeros"} or _looks_like_file(source):
                 continue
             if _looks_like_device(source):
-                self._captures[slot.key] = self._open_capture(slot)
+                self._captures[slot.key] = self._open_capture(slot, source=source)
             else:
                 raise CameraError(
                     f"unsupported camera source {source!r} for {slot.key}; "
-                    "use an index, /dev/videoX path, image path, or dummy"
+                    "use an index, /dev/videoX path, realsense:<serial>, image path, or dummy"
                 )
 
     def disconnect_all(self) -> None:
@@ -265,8 +273,7 @@ class CameraManager:
                 age_ms = (reference - frame.monotonic_time) * 1000.0
                 if age_ms > max_age_ms:
                     raise CameraError(
-                        f"camera {key} frame is stale: age {age_ms:.1f}ms > "
-                        f"max {max_age_ms:.1f}ms"
+                        f"camera {key} frame is stale: age {age_ms:.1f}ms > max {max_age_ms:.1f}ms"
                     )
             frames[key] = frame
         return frames
@@ -287,7 +294,7 @@ class CameraManager:
 
     # ---------------------------------------------------------------- internals
 
-    def _open_capture(self, slot: CameraSlotConfig) -> Any:
+    def _open_capture(self, slot: CameraSlotConfig, *, source: str | None = None) -> Any:
         try:
             import cv2  # type: ignore
         except ImportError as exc:
@@ -295,14 +302,30 @@ class CameraManager:
                 "opencv-python is required for live camera devices; "
                 "use --image-source for dry-run or install the runtime env"
             ) from exc
-        target = int(slot.source) if slot.source.isdigit() else slot.source
-        capture = cv2.VideoCapture(target)
+        target_source = slot.source if source is None else source
+        target = int(target_source) if target_source.isdigit() else target_source
+        capture = cv2.VideoCapture(target, cv2.CAP_V4L2)
         if not capture.isOpened():
-            raise CameraError(f"failed to open camera {slot.key}:{slot.source}")
-        capture.set(cv2.CAP_PROP_FRAME_WIDTH, slot.width)
-        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, slot.height)
-        capture.set(cv2.CAP_PROP_FPS, slot.fps)
-        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            raise CameraError(f"failed to open camera {slot.key}:{target_source}")
+        try:
+            capture.set(
+                cv2.CAP_PROP_FOURCC,
+                cv2.VideoWriter_fourcc(*_CAPTURE_FOURCC),
+            )
+            capture.set(cv2.CAP_PROP_FRAME_WIDTH, slot.width)
+            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, slot.height)
+            capture.set(cv2.CAP_PROP_FPS, slot.capture_fps)
+            capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            _validate_capture_negotiation(capture, slot, cv2)
+        except Exception:
+            capture.release()
+            raise
+        backend_name = getattr(capture, "getBackendName", lambda: "V4L2")()
+        print(
+            f"[camera] {slot.key}:{target_source} backend={backend_name} "
+            f"native={slot.width}x{slot.height}@{slot.capture_fps:g}fps "
+            f"processing={slot.fps:g}fps"
+        )
         return capture
 
     def _acquire_frame(self, slot: CameraSlotConfig) -> np.ndarray:
@@ -328,6 +351,11 @@ class CameraManager:
         ok, frame = capture.read()
         if not ok or frame is None:
             raise CameraError(f"camera {slot.key} read timeout/failure")
+        if frame.shape[:2] != (slot.height, slot.width):
+            raise CameraError(
+                f"camera {slot.key} returned {frame.shape[1]}x{frame.shape[0]}, "
+                f"expected native {slot.width}x{slot.height}; refusing post-capture resize"
+            )
         # OpenCV returns BGR.
         return np.ascontiguousarray(frame[..., ::-1]).astype(np.uint8)
 
@@ -357,6 +385,102 @@ def _looks_like_file(source: str) -> bool:
 
 def _looks_like_device(source: str) -> bool:
     return source.isdigit() or source.startswith("/dev/video")
+
+
+def _resolve_live_source(source: str) -> str:
+    if source.startswith(_REALSENSE_SOURCE_PREFIX):
+        serial = source[len(_REALSENSE_SOURCE_PREFIX) :].strip()
+        if not serial:
+            raise CameraError("realsense camera source must be realsense:<serial>")
+        return _resolve_realsense_video_node(serial)
+    return source
+
+
+def _resolve_realsense_video_node(serial_number: str) -> str:
+    devices = _enumerate_realsense_devices()
+    device = next((item for item in devices if item.serial_number == serial_number), None)
+    if device is None:
+        available = ", ".join(sorted(item.serial_number for item in devices)) or "none"
+        raise CameraError(
+            f"RealSense serial {serial_number} not found. Available serials: {available}"
+        )
+
+    physical_port = Path(device.physical_port)
+    usb_device_dir = physical_port.parents[2]
+    video_nodes = sorted(
+        {
+            Path("/dev") / path.name
+            for path in usb_device_dir.rglob("video*")
+            if path.name.startswith("video") and path.name[5:].isdigit()
+        },
+        key=lambda path: path.name,
+    )
+    if not video_nodes:
+        raise CameraError(
+            f"RealSense serial {serial_number} has no video nodes under {usb_device_dir}"
+        )
+
+    preferred = [
+        path
+        for path in video_nodes
+        if _node_supports_capture_format(path, fourcc=_CAPTURE_FOURCC)
+    ]
+    if not preferred:
+        available = ", ".join(path.name for path in video_nodes)
+        raise CameraError(
+            f"RealSense serial {serial_number} has no node advertising {_CAPTURE_FOURCC}; "
+            f"found nodes: {available}"
+        )
+    return str(preferred[-1])
+
+
+@dataclass(frozen=True)
+class _RealSenseDevice:
+    serial_number: str
+    physical_port: str
+
+
+def _enumerate_realsense_devices() -> list[_RealSenseDevice]:
+    try:
+        output = subprocess.check_output(
+            ["rs-enumerate-devices"],
+            text=True,
+            stderr=subprocess.STDOUT,
+        )
+    except FileNotFoundError as exc:
+        raise CameraError(
+            "rs-enumerate-devices is not installed; cannot resolve realsense:<serial>"
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        raise CameraError(f"rs-enumerate-devices failed: {exc.output.strip()}") from exc
+
+    devices: list[_RealSenseDevice] = []
+    for block in output.split("Device info:"):
+        if "Serial Number" not in block or "Physical Port" not in block:
+            continue
+        serial_match = re.search(r"Serial Number\s*:\s*(\S+)", block)
+        port_match = re.search(r"Physical Port\s*:\s*(\S+)", block)
+        if serial_match is None or port_match is None:
+            continue
+        devices.append(
+            _RealSenseDevice(
+                serial_number=serial_match.group(1).strip(),
+                physical_port=port_match.group(1).strip(),
+            )
+        )
+    return devices
+
+
+def _node_supports_capture_format(path: Path, *, fourcc: str) -> bool:
+    try:
+        output = subprocess.check_output(
+            ["v4l2-ctl", "-d", str(path), "--list-formats-ext"],
+            text=True,
+            stderr=subprocess.STDOUT,
+        )
+    except Exception:
+        return False
+    return f"'{fourcc}'" in output
 
 
 def _apply_stereo_crop(image: np.ndarray, slot: CameraSlotConfig) -> np.ndarray:
@@ -393,6 +517,24 @@ def _resize_rgb(image: np.ndarray, width: int, height: int) -> np.ndarray:
     except Exception:
         pil = Image.fromarray(image.astype(np.uint8)).resize((width, height), Image.BILINEAR)
         return np.asarray(pil, dtype=np.uint8)
+
+
+def _validate_capture_negotiation(capture: Any, slot: CameraSlotConfig, cv2: Any) -> None:
+    actual_width = float(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    actual_height = float(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    actual_fps = float(capture.get(cv2.CAP_PROP_FPS))
+    mismatches = []
+    if abs(actual_width - slot.width) > _NEGOTIATION_TOLERANCE:
+        mismatches.append(f"width={actual_width:g}, requested={slot.width}")
+    if abs(actual_height - slot.height) > _NEGOTIATION_TOLERANCE:
+        mismatches.append(f"height={actual_height:g}, requested={slot.height}")
+    if abs(actual_fps - slot.capture_fps) > _NEGOTIATION_TOLERANCE:
+        mismatches.append(f"fps={actual_fps:g}, requested={slot.capture_fps:g}")
+    if mismatches:
+        raise CameraError(
+            f"camera {slot.key}:{slot.source} rejected native capture settings: "
+            + "; ".join(mismatches)
+        )
 
 
 def _validate_rgb(image: np.ndarray, key: str) -> None:
