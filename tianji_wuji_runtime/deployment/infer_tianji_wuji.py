@@ -921,9 +921,9 @@ def main() -> int:
                         log_event(
                             "chunk_replan_delay",
                             chunk_index=chunk_index,
-                            sleep_sec=0.15,
+                            sleep_sec=0.05,
                         )
-                        time.sleep(0.15)
+                        time.sleep(0.05)
                     if reached_max_chunks:
                         break
                 except (
